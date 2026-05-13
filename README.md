@@ -1,188 +1,132 @@
-# Vivarium Controller (viva-logger)
+# Viva Logger
 
-An early-stage vivarium monitoring and control project built around a **LabJack T-Series DAQ** and a **Raspberry Pi**.
+Python logging and control code for a LabJack-based vivarium controller.
 
-The near-term focus is **reliable data logging** and a clean foundation for future control + visualization (local network dashboard, alerts, etc.). This repository is a work in progress and will evolve as the system matures.
+The current package reads environmental sensors, writes JSONL records, and can
+drive simple controls such as active-low relays, PWM lighting, and pulsed
+humidity control. The real hardware layer is intentionally small so the runtime
+can also be exercised with a mock LabJack driver.
 
----
+## Current Shape
 
-## Why This Exists
+- `logger.models`: Pydantic configuration and log-record schemas.
+- `logger.hardware`: real and mock LabJack drivers.
+- `logger.runtime`: sensor decoding, control state machines, scheduling,
+  logging, and runtime assembly.
+- `examples`: runnable configuration examples.
+- `tests/penelope.py`: an early Penelope one-shot script. It is useful as a
+  hardware sketch, but it does not express the full feature set.
 
-I like LabJack devices.
+## Installation
 
-They’re capable, reasonably priced (for what they are), and—critically—not painful to learn. The **LJM** library is straightforward and easy to work with, and I’ve used LabJacks in a lab setting at work. That familiarity made them an easy choice for a small, reliable data acquisition system.
-
-This project started when my son asked for a **crested gecko** for his birthday.
-
-Six months later, I’m debugging climate control.
-
-The current setup includes:
-- A **DC fan** ducted to the base enclosure for fresh air exchange
-- A **MistKing** misting system for humidity control
-- A simple temperature + relative humidity sensor array (currently a mix of **I²C devices** and **10k thermistors**)
-
-This isn’t the absolute cheapest way to do things, but it’s robust, understandable, and extensible. While this project is built around a LabJack DAQ, the overall software structure is intentionally generic and could be adapted to other DAQ hardware with minimal changes.
-
----
-
-## Overview
-
-At a high level, the system consists of:
-
-- **LabJack T-Series DAQ** for sensor inputs (and eventually outputs)
-- **Raspberry Pi** running Python for acquisition + logging
-- A software structure intended to grow incrementally without becoming a spaghetti monster
-
-Right now, the emphasis is on logging and reliability over UI polish.
-
----
-
-## Quick Start
-
-### Prerequisites
-- Python >=3.11
-- A LabJack **T-Series** device (the default script config uses a `T4`)
-- LabJack drivers + **LJM** installed (and the device connected)
-
-### Install
-This project is configured via `pyproject.toml`.
-
-```bash
-git clone <your-repo-url>
-cd viva-logger
-```
-
-If you use Poetry:
+This project expects Python 3.11 or newer.
 
 ```bash
 poetry install
 ```
 
-### Create the log directory
-The logger writes into a local `LOGS/` folder and expects it to already exist.
+For real hardware runs, install the LabJack LJM driver stack for the machine
+running the logger and connect the LabJack before starting a runtime.
+
+## Penelope Examples
+
+The Penelope examples use the wiring assumptions from `tests/penelope.py`:
+
+- LabJack T4.
+- T9602 temperature/RH sensor on SDA DIO8, SCL DIO9, address `0x28`.
+- MistKing/mister relay on DIO12. Relay logic is active-low: `0` is on, `1` is
+  off.
+- LED dimmer PWM on DIO6 at 1000 Hz.
+
+The examples preserve the script's `dio=6` LED setting. If the physical LED
+wire is on a different LabJack terminal, update the DIO number before running
+the full control example.
+
+`examples/penelope_minimal.py` mirrors the older one-shot script. It logs the
+LabJack temperature, T9602 temperature/RH, relay state, and manual LED duty
+cycle. It does not schedule the LED or run humidity control.
 
 ```bash
-mkdir -p LOGS
+poetry run python -m examples.penelope_minimal
 ```
 
-### Run
-`viva-logger.py` is runnable as a script via its `__main__` section. It constructs a `logger_config`,
-instantiates `Logger(**logger_config)`, and calls `logger.run()`.
+`examples/penelope_full.py` is the fuller Penelope configuration:
+
+- LED PWM runs on a daily window from 08:00 to 20:00.
+- LED duty cycle ramps from `0.03` to `0.30` over one hour.
+- LED duty cycle returns to `0.0` outside the daylight window.
+- The mister relay is controlled by `HumidityControlRuntime`.
+- Day and night humidity targets use separate schedules.
+- Misting happens in bounded pulses with settle time, minimum off time, a hard
+  RH guard, and a consecutive-pulse limit.
+
+Run it only after checking wiring and setpoints:
 
 ```bash
-# if using poetry:
-poetry run python viva-logger.py
-
-# otherwise:
-python viva-logger.py
+poetry run python -m examples.penelope_full
 ```
 
-When running, it streams newline-delimited JSON to:
+The setpoints in the example are starting values for software configuration,
+not a universal animal-care prescription. Calibrate the sensor location, LED
+dimmer response, misting response, and actual husbandry targets before leaving
+hardware unattended.
 
-- `LOGS/YYYY-MM-DD.jsonl`
+## Configuration Model
 
-It also rolls over to a new file at local midnight.
+A complete runtime starts with `LoggerConfig`:
 
-Stop with Ctrl+C.
+```python
+from logger.runtime import build_runtime
+from examples.penelope_full import make_config
 
-### Configure sensors / read rate
-Edit the `logger_config` inside `if __name__ == "__main__":` in `viva-logger.py`.
+config = make_config()
+system = build_runtime(config)
 
-Current defaults (as shipped):
-- device type: `T4`
-- sample interval: `htz: 15` (seconds between reads)
-- sensors: `t6902` temp/RH sensor, with placeholders for 10k thermistors
+system.connect()
+system.initialize()
+record, path = system.run_once(write=True)
+system.close()
+```
 
----
+The main config sections are:
 
-## Current Features
+- `device`: LabJack connection settings.
+- `sensors`: sensor definitions such as LabJack device temperature, T9602, or
+  thermistor inputs.
+- `relays`: digital outputs, currently modeled for active-low relay boards.
+- `pwm_outputs`: PWM outputs with optional daily schedules and ramping.
+- `humidity_controls`: pulse-based RH controllers that read one RH sensor and
+  drive one relay.
 
-- Reads sensor data via LabJack T-Series DAQ
-- Logs time-series data locally as **JSONL** (one record per line)
-- Daily log rotation at local midnight
-- Designed for long-running, headless operation on a Raspberry Pi
-- Structured to support multiple sensor channels
+## Runtime Behavior
 
----
+Each sample pass:
 
-## TODO / Roadmap (Top of Mind)
+1. Applies scheduled PWM state.
+2. Reads sensors.
+3. Updates humidity controllers from the latest RH readings.
+4. Captures relay, PWM, and humidity-control snapshots.
+5. Writes one JSON object line to `LOG_DIR/YYYY-MM-DD.jsonl`.
 
-**Reliability**
-- [ ] Add robust reconnect behavior when the LabJack connection drops (USB / wired comms hiccups)
-- [ ] Improve error handling + retry/backoff so the logger can run unattended for long periods
+Errors from individual sensors or controls are captured in the record's
+`errors` list so one failed read does not necessarily stop the whole sample.
 
-**Deployment**
-- [ ] Run the logger natively on the Raspberry Pi (headless, as a service)
-- [ ] Document SSH-based workflow for managing the Pi
-- [ ] Explore secure remote access from outside the local network (VPN / tunnel approach)
+## Development Checks
 
-**Visibility / UI**
-- [ ] Build a local network dashboard (Plotly Dash) to view live status + historical logs
-- [ ] Add basic health indicators (DAQ connected, last sample time, sensor sanity checks)
+Basic syntax check:
 
-**Sensors / Actuators**
-- [ ] Integrate ceramic heater control (and decide on control strategy + safety limits)
-- [ ] Finish wiring / cleanup and finalize a “known-good” deployment configuration
+```bash
+python -m compileall logger examples
+```
 
-**Media / Logging**
-- [ ] Add a camera for visual logging (especially nighttime gecko activity)
-- [ ] Decide on storage strategy (clips vs timelapse vs motion-triggered)
-
-**Docs / Sharing**
-- [ ] Publish a schematic / wiring diagram of the actual vivarium setup
-- [ ] Write up the build story: how the vivarium and the control system evolved together
-
----
-
-## Hardware
-
-- Raspberry Pi (tested on Raspberry Pi OS)
-- LabJack T-Series DAQ
-- Environmental sensors compatible with LabJack analog inputs
-- (Optional / planned) camera + heater integration
-
----
-
-## Software
-
-- Python >=3.11 (see `pyproject.toml` for exact pins)
-
-Key dependencies (from `pyproject.toml`):
-
-**DAQ / Hardware**
-- `labjack-ljm`
-
-**Data + Analysis**
-- `pandas`
-- `scikit-learn`
-- `scipy`
-- `shapely`
-
-**Validation / Schemas**
-- `jsonschema`
-- `pydantic`
-
-**Visualization / Export**
-- `kaleido`
-- `plotly`
-- `xlsxwriter`
-
-**Database / Remote Access**
-- `paramiko`
-- `psycopg`
-- `sshtunnel`
-
-**Other**
-- `datetime`
-
----
+The mock driver in `logger.hardware.MockLabjackDriver` can be used for local
+experiments that should not touch real hardware.
 
 ## Status
 
-This project is in **active early development**.  
-Expect rough edges, evolving structure, and changing assumptions.
-
----
+This is still active, practical workbench code. Expect the configuration shape
+and runtime details to keep evolving as the vivarium hardware becomes more
+settled.
 
 ## License
 
