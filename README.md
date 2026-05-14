@@ -111,6 +111,34 @@ Each sample pass:
 Errors from individual sensors or controls are captured in the record's
 `errors` list so one failed read does not necessarily stop the whole sample.
 
+## Dashboard
+
+The package includes a local Dash app for watching a JSONL log file while the
+logger writes to it.
+
+```bash
+poetry run python -m logger.dashboard --log VIV-LOGS/2026-05-13.jsonl
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8050
+```
+
+The dashboard has a readout tab for the newest record and a trends tab for
+sensor values, relay states, PWM state, humidity-controller state, and errors.
+It refreshes every 5 seconds by default.
+
+On a Raspberry Pi, bind to all interfaces if you want to view it from another
+computer on the same network:
+
+```bash
+poetry run python -m logger.dashboard --host 0.0.0.0 --log VIV-LOGS/2026-05-13.jsonl
+```
+
+Then browse to `http://penelope-pi.local:8050` or the Pi's IP address.
+
 ## Development Checks
 
 Basic syntax check:
