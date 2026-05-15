@@ -11,8 +11,12 @@ from typing import Any, Iterable, Optional
 
 import pandas as pd
 
+from .config_files import load_logger_config, save_logger_config
+from .models import LoggerConfig
+
 
 DEFAULT_LOG_DIR = Path("VIV-LOGS")
+DEFAULT_CONFIG_PATH = Path("VIV-CONFIG/penelope.json")
 DEFAULT_MAX_RECORDS = 2_000
 DEFAULT_REFRESH_MS = 5_000
 
@@ -234,9 +238,144 @@ def _flatten_values(prefix: str, values: dict[str, Any], row: dict[str, Any]) ->
         row[column] = value
 
 
+def load_or_create_dashboard_config(path: Path) -> tuple[LoggerConfig, bool]:
+    """Load a config file, creating a Penelope default when missing."""
+
+    if path.exists():
+        return load_logger_config(path), False
+
+    from examples.penelope_full import make_config
+
+    config = make_config()
+    save_logger_config(config, path)
+    return config, True
+
+
+def update_nested_value(data: dict[str, Any], path: str, value: Any) -> None:
+    """Set a dotted-path value inside a nested config dictionary."""
+
+    parts = path.split(".")
+    target: Any = data
+    for part in parts[:-1]:
+        if isinstance(target, list):
+            target = target[int(part)]
+        else:
+            target = target[part]
+
+    key = parts[-1]
+    if isinstance(target, list):
+        target[int(key)] = value
+    else:
+        target[key] = value
+
+
+def normalize_config_form_value(path: str, value: Any) -> Any:
+    """Normalize a Dash form value before Pydantic config validation."""
+
+    if value == "":
+        return None
+
+    if path.endswith((".start_time", ".end_time")) and isinstance(value, str):
+        return f"{value}:00" if len(value) == 5 else value
+
+    if path.endswith(".enabled"):
+        return value in {True, "true", "True", "1", 1}
+
+    if path.endswith(".max_consecutive_pulses"):
+        return int(value)
+
+    return value
+
+
+def active_humidity_config_values(
+    config: LoggerConfig,
+    timestamp: pd.Timestamp,
+    *,
+    control_name: str = "penelope-mister",
+) -> Optional[dict[str, Any]]:
+    """Return the config humidity schedule active at ``timestamp``."""
+
+    if timestamp is None or pd.isna(timestamp):
+        return None
+
+    if not isinstance(timestamp, pd.Timestamp):
+        timestamp = pd.Timestamp(timestamp)
+
+    now = timestamp.to_pydatetime()
+    if now.tzinfo is not None:
+        now = now.astimezone()
+
+    for control in config.humidity_controls:
+        if control.name != control_name:
+            continue
+
+        candidates: list[dict[str, Any]] = []
+        for schedule in control.schedules:
+            if not schedule.enabled:
+                continue
+
+            start_at, end_at = _schedule_window(
+                start_time=schedule.start_time,
+                end_time=schedule.end_time,
+                now=now,
+            )
+            if start_at <= now < end_at:
+                target_rh_pct = min(
+                    max(0.0, schedule.target_rh_pct),
+                    control.hard_max_rh_pct,
+                )
+                if schedule.trigger_below_rh_pct is None:
+                    trigger_below_rh_pct = (
+                        target_rh_pct - control.default_hysteresis_rh_pct
+                    )
+                else:
+                    trigger_below_rh_pct = schedule.trigger_below_rh_pct
+
+                trigger_below_rh_pct = max(
+                    0.0,
+                    min(100.0, trigger_below_rh_pct),
+                )
+                trigger_below_rh_pct = min(trigger_below_rh_pct, target_rh_pct)
+                candidates.append({
+                    "schedule": schedule.name,
+                    "target_rh_pct": target_rh_pct,
+                    "trigger_below_rh_pct": trigger_below_rh_pct,
+                })
+
+        if candidates:
+            return max(candidates, key=lambda item: item["target_rh_pct"])
+
+    return None
+
+
+def _schedule_window(
+    *,
+    start_time: dt.time,
+    end_time: dt.time,
+    now: dt.datetime,
+) -> tuple[dt.datetime, dt.datetime]:
+    """Return a concrete local-time schedule window for ``now``."""
+
+    start_at = dt.datetime.combine(now.date(), start_time)
+    end_at = dt.datetime.combine(now.date(), end_time)
+
+    if now.tzinfo is not None:
+        start_at = start_at.replace(tzinfo=now.tzinfo)
+        end_at = end_at.replace(tzinfo=now.tzinfo)
+
+    if end_at <= start_at:
+        if now < end_at:
+            start_at -= dt.timedelta(days=1)
+        else:
+            end_at += dt.timedelta(days=1)
+
+    return start_at, end_at
+
+
 def create_app(
     *,
     log_path: Optional[Path] = None,
+    config_path: Optional[Path] = None,
     max_records: int = DEFAULT_MAX_RECORDS,
     refresh_ms: int = DEFAULT_REFRESH_MS,
 ):
@@ -247,7 +386,7 @@ def create_app(
     """
 
     try:
-        from dash import Dash, Input, Output, State, dcc, html
+        from dash import ALL, Dash, Input, Output, State, ctx, dcc, html
         import plotly.graph_objects as go
     except ModuleNotFoundError as exc:
         missing = exc.name or "dash"
@@ -258,6 +397,7 @@ def create_app(
         ) from exc
 
     log_path = log_path or default_log_path()
+    config_path = config_path or DEFAULT_CONFIG_PATH
 
     colors = {
         "page": "#f7f8fb",
@@ -288,6 +428,31 @@ def create_app(
         "display": "flex",
         "flexDirection": "column",
         "justifyContent": "space-between",
+    }
+    input_style = {
+        "height": "36px",
+        "border": f"1px solid {colors['border']}",
+        "borderRadius": "6px",
+        "padding": "0 10px",
+        "fontSize": "14px",
+        "width": "100%",
+        "boxSizing": "border-box",
+    }
+    button_style = {
+        "height": "36px",
+        "border": f"1px solid {colors['border']}",
+        "borderRadius": "6px",
+        "padding": "0 12px",
+        "fontSize": "14px",
+        "fontWeight": 700,
+        "backgroundColor": colors["panel"],
+        "cursor": "pointer",
+    }
+    primary_button_style = {
+        **button_style,
+        "backgroundColor": colors["accent"],
+        "border": f"1px solid {colors['accent']}",
+        "color": "#ffffff",
     }
 
     app = Dash(__name__, title="Viva Logger")
@@ -450,6 +615,69 @@ def create_app(
                             ),
                         ],
                     ),
+                    dcc.Tab(
+                        label="Config",
+                        value="config",
+                        children=[
+                            html.Div(
+                                style={
+                                    "display": "grid",
+                                    "gridTemplateColumns": "minmax(280px, 1fr) auto auto",
+                                    "gap": "10px",
+                                    "alignItems": "end",
+                                    "marginTop": "16px",
+                                },
+                                children=[
+                                    html.Div(
+                                        style={"display": "grid", "gap": "6px"},
+                                        children=[
+                                            html.Label(
+                                                "Config file",
+                                                htmlFor="config-path",
+                                                style={
+                                                    "fontSize": "12px",
+                                                    "fontWeight": 700,
+                                                    "color": colors["muted"],
+                                                },
+                                            ),
+                                            dcc.Input(
+                                                id="config-path",
+                                                type="text",
+                                                value=str(config_path),
+                                                debounce=True,
+                                                style=input_style,
+                                            ),
+                                        ],
+                                    ),
+                                    html.Button(
+                                        "Load",
+                                        id="load-config",
+                                        n_clicks=0,
+                                        style=button_style,
+                                    ),
+                                    html.Button(
+                                        "Save",
+                                        id="save-config",
+                                        n_clicks=0,
+                                        style=primary_button_style,
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                id="config-message",
+                                style={
+                                    "minHeight": "22px",
+                                    "marginTop": "10px",
+                                    "fontSize": "13px",
+                                    "color": colors["muted"],
+                                },
+                            ),
+                            html.Div(
+                                id="config-editor",
+                                style={"marginTop": "10px"},
+                            ),
+                        ],
+                    ),
                 ],
             ),
         ],
@@ -512,7 +740,11 @@ def create_app(
             return "n/a"
         return f"{number:.{digits}f}"
 
-    def build_readout(records: list[dict[str, Any]], frame: pd.DataFrame):
+    def build_readout(
+        records: list[dict[str, Any]],
+        frame: pd.DataFrame,
+        config_values: Optional[dict[str, Any]] = None,
+    ):
         if frame.empty or not records:
             return html.Div(
                 "No records loaded.",
@@ -533,8 +765,21 @@ def create_app(
         )
         vpd = latest_value(frame, ":vpd_kpa")
         led = latest_value(frame, ":output_duty_cycle")
-        target = latest_value(frame, ":target_rh_pct")
-        trigger = latest_value(frame, ":trigger_below_rh_pct")
+        target = latest_value(
+            frame,
+            ":target_rh_pct",
+            preferred_prefix="control:penelope-mister:",
+        )
+        trigger = latest_value(
+            frame,
+            ":trigger_below_rh_pct",
+            preferred_prefix="control:penelope-mister:",
+        )
+        active_schedule = latest_value(
+            frame,
+            ":active_schedule",
+            preferred_prefix="control:penelope-mister:",
+        )
         mister_mode = latest_value(
             frame,
             ":mode",
@@ -546,6 +791,27 @@ def create_app(
             preferred_prefix="control:penelope-mister:",
         )
         relay = latest_value(frame, ":onoff")
+
+        config_target = None
+        config_trigger = None
+        config_schedule = None
+        target_detail = f"trigger {format_number(trigger)}%"
+        if config_values is not None:
+            config_target = config_values.get("target_rh_pct")
+            config_trigger = config_values.get("trigger_below_rh_pct")
+            config_schedule = config_values.get("schedule")
+            target_detail = (
+                f"log {active_schedule}, trigger {format_number(trigger)}%; "
+                f"config {config_schedule} {format_number(config_target)}%"
+                f"/{format_number(config_trigger)}%"
+            )
+            try:
+                if abs(float(target) - float(config_target)) > 0.001:
+                    target_detail = f"mismatch: {target_detail}"
+            except (TypeError, ValueError):
+                pass
+        elif active_schedule is not None:
+            target_detail = f"{active_schedule}, trigger {format_number(trigger)}%"
 
         cards = html.Div(
             style={
@@ -574,9 +840,9 @@ def create_app(
                     f"phase {mister_phase}, relay {relay}",
                 ),
                 metric_card(
-                    "Humidity target",
+                    "Logged target",
                     f"{format_number(target)}%",
-                    f"trigger {format_number(trigger)}%",
+                    target_detail,
                 ),
                 metric_card(
                     "Errors",
@@ -743,6 +1009,365 @@ def create_app(
         figure.update_yaxes(type="category")
         return figure
 
+    def config_field(
+        path: str,
+        label: str,
+        value: Any,
+        *,
+        field_type: str = "number",
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+        step: Any = "any",
+    ):
+        field_id = {"role": "config-field", "path": path}
+        label_node = html.Label(
+            label,
+            style={
+                "fontSize": "12px",
+                "fontWeight": 700,
+                "color": colors["muted"],
+            },
+        )
+
+        if field_type == "bool":
+            control = dcc.Dropdown(
+                id=field_id,
+                options=[
+                    {"label": "Enabled", "value": "true"},
+                    {"label": "Disabled", "value": "false"},
+                ],
+                value="true" if value else "false",
+                clearable=False,
+                style={"fontSize": "14px"},
+            )
+        else:
+            input_value = value
+            if field_type == "time" and isinstance(value, str):
+                input_value = value[:5]
+            if input_value is None:
+                input_value = ""
+
+            control = dcc.Input(
+                id=field_id,
+                type=field_type,
+                value=input_value,
+                min=minimum,
+                max=maximum,
+                step=step,
+                debounce=True,
+                style=input_style,
+            )
+
+        return html.Div(
+            style={"display": "grid", "gap": "6px"},
+            children=[label_node, control],
+        )
+
+    def config_grid(children: list[Any]):
+        return html.Div(
+            style={
+                "display": "grid",
+                "gridTemplateColumns": "repeat(auto-fit, minmax(170px, 1fr))",
+                "gap": "12px",
+            },
+            children=children,
+        )
+
+    def build_config_editor(config: LoggerConfig):
+        data = config.model_dump(mode="json")
+
+        sections: list[Any] = [
+            html.Div(
+                style=panel_style,
+                children=[
+                    html.H2(
+                        "General",
+                        style={"fontSize": "18px", "margin": "0 0 12px 0"},
+                    ),
+                    config_grid([
+                        config_field(
+                            "sample_interval_s",
+                            "Sample interval (s)",
+                            data["sample_interval_s"],
+                            minimum=0.1,
+                            step=0.1,
+                        ),
+                        config_field(
+                            "log_dir",
+                            "Log directory",
+                            data["log_dir"],
+                            field_type="text",
+                        ),
+                    ]),
+                ],
+            )
+        ]
+
+        for pwm_index, pwm in enumerate(data.get("pwm_outputs") or []):
+            pwm_children = [
+                config_field(
+                    f"pwm_outputs.{pwm_index}.enabled",
+                    "Enabled",
+                    pwm.get("enabled"),
+                    field_type="bool",
+                ),
+                config_field(
+                    f"pwm_outputs.{pwm_index}.duty_cycle",
+                    "Manual duty",
+                    pwm.get("duty_cycle"),
+                    minimum=0.0,
+                    maximum=1.0,
+                    step=0.01,
+                ),
+                config_field(
+                    f"pwm_outputs.{pwm_index}.frequency_hz",
+                    "Frequency (Hz)",
+                    pwm.get("frequency_hz"),
+                    minimum=1.0,
+                    step=1.0,
+                ),
+            ]
+
+            for schedule_index, schedule in enumerate(pwm.get("schedules") or []):
+                base = f"pwm_outputs.{pwm_index}.schedules.{schedule_index}"
+                pwm_children.extend([
+                    config_field(
+                        f"{base}.start_time",
+                        f"{schedule.get('name')} start",
+                        schedule.get("start_time"),
+                        field_type="time",
+                    ),
+                    config_field(
+                        f"{base}.end_time",
+                        f"{schedule.get('name')} end",
+                        schedule.get("end_time"),
+                        field_type="time",
+                    ),
+                    config_field(
+                        f"{base}.min_duty_cycle",
+                        "Min duty",
+                        schedule.get("min_duty_cycle"),
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.01,
+                    ),
+                    config_field(
+                        f"{base}.max_duty_cycle",
+                        "Max duty",
+                        schedule.get("max_duty_cycle"),
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.01,
+                    ),
+                    config_field(
+                        f"{base}.outside_duty_cycle",
+                        "Outside duty",
+                        schedule.get("outside_duty_cycle"),
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.01,
+                    ),
+                    config_field(
+                        f"{base}.ramp_duration_s",
+                        "Ramp (s)",
+                        schedule.get("ramp_duration_s"),
+                        minimum=0.0,
+                        step=60.0,
+                    ),
+                ])
+
+            sections.append(
+                html.Div(
+                    style=panel_style,
+                    children=[
+                        html.H2(
+                            f"PWM: {pwm.get('name')}",
+                            style={"fontSize": "18px", "margin": "0 0 12px 0"},
+                        ),
+                        config_grid(pwm_children),
+                    ],
+                )
+            )
+
+        for control_index, control in enumerate(data.get("humidity_controls") or []):
+            control_children = [
+                config_field(
+                    f"humidity_controls.{control_index}.enabled",
+                    "Enabled",
+                    control.get("enabled"),
+                    field_type="bool",
+                ),
+                config_field(
+                    f"humidity_controls.{control_index}.max_pulse_s",
+                    "Max pulse (s)",
+                    control.get("max_pulse_s"),
+                    minimum=0.1,
+                    step=1.0,
+                ),
+                config_field(
+                    f"humidity_controls.{control_index}.settle_s",
+                    "Settle (s)",
+                    control.get("settle_s"),
+                    minimum=0.0,
+                    step=5.0,
+                ),
+                config_field(
+                    f"humidity_controls.{control_index}.min_off_s",
+                    "Min off (s)",
+                    control.get("min_off_s"),
+                    minimum=0.0,
+                    step=1.0,
+                ),
+                config_field(
+                    f"humidity_controls.{control_index}.hard_max_rh_pct",
+                    "Hard max RH (%)",
+                    control.get("hard_max_rh_pct"),
+                    minimum=0.0,
+                    maximum=100.0,
+                    step=1.0,
+                ),
+                config_field(
+                    f"humidity_controls.{control_index}.default_hysteresis_rh_pct",
+                    "Default hysteresis (%)",
+                    control.get("default_hysteresis_rh_pct"),
+                    minimum=0.0,
+                    maximum=100.0,
+                    step=1.0,
+                ),
+                config_field(
+                    f"humidity_controls.{control_index}.max_consecutive_pulses",
+                    "Max pulses",
+                    control.get("max_consecutive_pulses"),
+                    minimum=1,
+                    step=1,
+                ),
+                config_field(
+                    f"humidity_controls.{control_index}.low_response_delta_rh_pct",
+                    "Low response delta (%)",
+                    control.get("low_response_delta_rh_pct"),
+                    minimum=0.0,
+                    maximum=100.0,
+                    step=0.1,
+                ),
+            ]
+
+            for schedule_index, schedule in enumerate(control.get("schedules") or []):
+                base = f"humidity_controls.{control_index}.schedules.{schedule_index}"
+                control_children.extend([
+                    config_field(
+                        f"{base}.enabled",
+                        f"{schedule.get('name')} enabled",
+                        schedule.get("enabled"),
+                        field_type="bool",
+                    ),
+                    config_field(
+                        f"{base}.start_time",
+                        f"{schedule.get('name')} start",
+                        schedule.get("start_time"),
+                        field_type="time",
+                    ),
+                    config_field(
+                        f"{base}.end_time",
+                        f"{schedule.get('name')} end",
+                        schedule.get("end_time"),
+                        field_type="time",
+                    ),
+                    config_field(
+                        f"{base}.target_rh_pct",
+                        f"{schedule.get('name')} target RH (%)",
+                        schedule.get("target_rh_pct"),
+                        minimum=0.0,
+                        maximum=100.0,
+                        step=1.0,
+                    ),
+                    config_field(
+                        f"{base}.trigger_below_rh_pct",
+                        f"{schedule.get('name')} trigger RH (%)",
+                        schedule.get("trigger_below_rh_pct"),
+                        minimum=0.0,
+                        maximum=100.0,
+                        step=1.0,
+                    ),
+                ])
+
+            sections.append(
+                html.Div(
+                    style=panel_style,
+                    children=[
+                        html.H2(
+                            f"Humidity: {control.get('name')}",
+                            style={"fontSize": "18px", "margin": "0 0 12px 0"},
+                        ),
+                        config_grid(control_children),
+                    ],
+                )
+            )
+
+        return html.Div(
+            style={"display": "grid", "gap": "14px"},
+            children=sections,
+        )
+
+    @app.callback(
+        Output("config-editor", "children"),
+        Output("config-message", "children"),
+        Input("load-config", "n_clicks"),
+        Input("save-config", "n_clicks"),
+        State("config-path", "value"),
+        State({"role": "config-field", "path": ALL}, "value"),
+        State({"role": "config-field", "path": ALL}, "id"),
+    )
+    def sync_config_editor(
+        _load_clicks: int,
+        _save_clicks: int,
+        config_path_value: str,
+        field_values: list[Any],
+        field_ids: list[dict[str, str]],
+    ):
+        current_path = Path(config_path_value or DEFAULT_CONFIG_PATH)
+
+        try:
+            if ctx.triggered_id == "save-config":
+                config, _created = load_or_create_dashboard_config(current_path)
+                data = config.model_dump(mode="json")
+
+                for field_id, field_value in zip(field_ids, field_values):
+                    path = field_id["path"]
+                    update_nested_value(
+                        data,
+                        path,
+                        normalize_config_form_value(path, field_value),
+                    )
+
+                config = LoggerConfig.model_validate(data)
+                save_logger_config(config, current_path)
+                message = (
+                    f"Saved {current_path}. "
+                    "The Penelope runtime will hot-reload this file."
+                )
+            else:
+                config, created = load_or_create_dashboard_config(current_path)
+                message = (
+                    f"Created {current_path}."
+                    if created
+                    else f"Loaded {current_path}."
+                )
+
+            return build_config_editor(config), message
+
+        except Exception as exc:
+            return (
+                html.Div(
+                    f"{type(exc).__name__}: {exc}",
+                    style={
+                        **panel_style,
+                        "borderColor": "#d92d20",
+                        "color": "#7a271a",
+                    },
+                ),
+                "Config change was not saved.",
+            )
+
     @app.callback(
         Output("readout", "children"),
         Output("numeric-series", "options"),
@@ -754,12 +1379,14 @@ def create_app(
         Output("status-line", "children"),
         Input("refresh", "n_intervals"),
         State("log-path", "value"),
+        State("config-path", "value"),
         State("numeric-series", "value"),
         State("state-series", "value"),
     )
     def refresh_dashboard(
         _n_intervals: int,
         log_path_value: str,
+        config_path_value: str,
         selected_numeric: Optional[list[str]],
         selected_state: Optional[list[str]],
     ):
@@ -795,8 +1422,20 @@ def create_app(
                 f"errors {int(latest.get('errors:count', 0) or 0)}"
             )
 
+        config_values = None
+        if not frame.empty:
+            config_path = Path(config_path_value or DEFAULT_CONFIG_PATH)
+            try:
+                config = load_logger_config(config_path)
+                config_values = active_humidity_config_values(
+                    config,
+                    frame.iloc[-1]["timestamp"],
+                )
+            except Exception:
+                config_values = None
+
         return (
-            build_readout(records, frame),
+            build_readout(records, frame, config_values),
             numeric_options,
             selected_numeric,
             state_options,
@@ -844,6 +1483,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="JSONL log file to display.",
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="JSON config file to edit.",
+    )
+    parser.add_argument(
         "--host",
         default="127.0.0.1",
         help="Host interface for the Dash server.",
@@ -880,6 +1525,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
     app = create_app(
         log_path=args.log,
+        config_path=args.config,
         max_records=args.max_records,
         refresh_ms=args.refresh_ms,
     )

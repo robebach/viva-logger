@@ -66,9 +66,9 @@ class LabjackDriver:
         return self
 
     def close(self) -> None:
-        """Close the LJM handle if connected and mark the driver disconnected."""
+        """Close any open LJM handle and mark the driver disconnected."""
 
-        if self.connected and self.handle is not None and self._ljm is not None:
+        if self.handle is not None and self._ljm is not None:
             self._ljm.close(self.handle)
 
         self.connected = False

@@ -339,6 +339,9 @@ class PWMRuntime:
     duty_cycle: float = field(init=False)
     enabled: bool = field(init=False)
     schedule_status: dict[str, object] = field(init=False, default_factory=dict)
+    startup_ramp_started_at: Optional[dt.datetime] = field(init=False, default=None)
+    startup_ramp_from_duty_cycle: float = field(init=False, default=0.0)
+    startup_ramp_duration_s: float = field(init=False, default=0.0)
 
     def __post_init__(self) -> None:
         """Initialize live PWM state from configuration defaults."""
@@ -390,6 +393,7 @@ class PWMRuntime:
     ) -> None:
         """Manually set duty cycle and mark scheduling as overridden."""
 
+        self._clear_startup_ramp()
         self.duty_cycle = max(0.0, min(1.0, duty_cycle))
         self.schedule_status = {
             "scheduled": bool(self.config.schedules),
@@ -424,12 +428,20 @@ class PWMRuntime:
         duty-cycle state untouched.
         """
 
+        now = now or dt.datetime.now().astimezone()
+        now = self._normalize_now(now)
+
         scheduled = self.scheduled_duty_cycle(now=now)
 
         if scheduled is None:
             return False
 
         duty_cycle, status = scheduled
+        duty_cycle, status = self._apply_startup_ramp(
+            duty_cycle=duty_cycle,
+            status=status,
+            now=now,
+        )
         self.duty_cycle = duty_cycle
         self.schedule_status = status
 
@@ -437,6 +449,54 @@ class PWMRuntime:
             self.apply(driver)
 
         return True
+
+    def configure_startup_from_off(
+        self,
+        driver: LabjackDriver,
+        *,
+        now: Optional[dt.datetime] = None,
+    ) -> None:
+        """Configure PWM off and ramp toward the current scheduled duty.
+
+        This avoids a startup jump when the logger boots during an active LED
+        schedule. Outputs without schedules, disabled outputs, or schedules
+        with a zero target are configured directly.
+        """
+
+        now = now or dt.datetime.now().astimezone()
+        now = self._normalize_now(now)
+        scheduled = self.scheduled_duty_cycle(now=now)
+
+        if scheduled is None:
+            self._clear_startup_ramp()
+            self.configure_and_apply(driver)
+            return
+
+        target_duty_cycle, status = scheduled
+        ramp_duration_s = float(status.get("effective_ramp_duration_s", 0.0) or 0.0)
+
+        if not self.enabled or target_duty_cycle <= 0.0 or ramp_duration_s <= 0.0:
+            self._clear_startup_ramp()
+            self.duty_cycle = target_duty_cycle
+            self.schedule_status = status
+            self.configure_and_apply(driver)
+            return
+
+        self.startup_ramp_started_at = now
+        self.startup_ramp_from_duty_cycle = 0.0
+        self.startup_ramp_duration_s = ramp_duration_s
+        self.duty_cycle = 0.0
+        self.schedule_status = {
+            **status,
+            "mode": "startup_ramping",
+            "scheduled_mode": status.get("mode"),
+            "startup_ramp_elapsed_s": 0.0,
+            "startup_ramp_duration_s": ramp_duration_s,
+            "startup_ramp_fraction": 0.0,
+            "startup_ramp_from_duty_cycle": 0.0,
+            "startup_ramp_target_duty_cycle": target_duty_cycle,
+        }
+        self.configure_and_apply(driver)
 
     def scheduled_duty_cycle(
         self,
@@ -449,7 +509,8 @@ class PWMRuntime:
         Windows may cross midnight. If more than one schedule is active, the
         highest resulting duty cycle wins. If none are active, the highest
         outside-window duty cycle wins so overlapping background schedules still
-        behave predictably.
+        behave predictably. The configured ramp duration is used symmetrically
+        at the start and end of active windows.
         """
 
         if not self.config.schedules:
@@ -497,11 +558,28 @@ class PWMRuntime:
             elapsed_s = max(0.0, (now - start_at).total_seconds())
             remaining_s = max(0.0, (end_at - now).total_seconds())
             ramp_duration_s = max(0.0, schedule.ramp_duration_s)
+            window_duration_s = max(0.0, (end_at - start_at).total_seconds())
+            effective_ramp_duration_s = min(
+                ramp_duration_s,
+                window_duration_s / 2.0,
+            )
 
-            if ramp_duration_s > 0.0 and elapsed_s < ramp_duration_s:
-                ramp_fraction = elapsed_s / ramp_duration_s
+            if (
+                effective_ramp_duration_s > 0.0
+                and elapsed_s < effective_ramp_duration_s
+            ):
+                ramp_fraction = elapsed_s / effective_ramp_duration_s
                 duty_cycle = min_duty + ((max_duty - min_duty) * ramp_fraction)
                 mode = "ramping_up"
+            elif (
+                effective_ramp_duration_s > 0.0
+                and remaining_s < effective_ramp_duration_s
+            ):
+                ramp_fraction = remaining_s / effective_ramp_duration_s
+                duty_cycle = outside_duty + (
+                    (max_duty - outside_duty) * ramp_fraction
+                )
+                mode = "ramping_down"
             else:
                 ramp_fraction = 1.0
                 duty_cycle = max_duty
@@ -519,9 +597,11 @@ class PWMRuntime:
                     "elapsed_s": elapsed_s,
                     "remaining_s": remaining_s,
                     "ramp_duration_s": ramp_duration_s,
+                    "effective_ramp_duration_s": effective_ramp_duration_s,
                     "ramp_fraction": ramp_fraction,
                     "min_duty_cycle": min_duty,
                     "max_duty_cycle": max_duty,
+                    "outside_duty_cycle": outside_duty,
                 },
             ))
 
@@ -566,6 +646,52 @@ class PWMRuntime:
         """Clamp a duty cycle to the inclusive 0..1 range."""
 
         return max(0.0, min(1.0, value))
+
+    def _clear_startup_ramp(self) -> None:
+        """Clear any one-time startup ramp state."""
+
+        self.startup_ramp_started_at = None
+        self.startup_ramp_from_duty_cycle = 0.0
+        self.startup_ramp_duration_s = 0.0
+
+    def _apply_startup_ramp(
+        self,
+        *,
+        duty_cycle: float,
+        status: dict[str, object],
+        now: dt.datetime,
+    ) -> tuple[float, dict[str, object]]:
+        """Blend the scheduled duty through the one-time startup ramp."""
+
+        if self.startup_ramp_started_at is None:
+            return duty_cycle, status
+
+        elapsed_s = max(
+            0.0,
+            (now - self.startup_ramp_started_at).total_seconds(),
+        )
+        duration_s = max(0.0, self.startup_ramp_duration_s)
+        if duration_s <= 0.0 or elapsed_s >= duration_s:
+            self._clear_startup_ramp()
+            return duty_cycle, {
+                **status,
+                "startup_ramp_complete": True,
+            }
+
+        ramp_fraction = elapsed_s / duration_s
+        ramped_duty_cycle = self.startup_ramp_from_duty_cycle + (
+            (duty_cycle - self.startup_ramp_from_duty_cycle) * ramp_fraction
+        )
+        return self._clamp01(ramped_duty_cycle), {
+            **status,
+            "mode": "startup_ramping",
+            "scheduled_mode": status.get("mode"),
+            "startup_ramp_elapsed_s": elapsed_s,
+            "startup_ramp_duration_s": duration_s,
+            "startup_ramp_fraction": ramp_fraction,
+            "startup_ramp_from_duty_cycle": self.startup_ramp_from_duty_cycle,
+            "startup_ramp_target_duty_cycle": duty_cycle,
+        }
 
     def snapshot(self) -> ControlState:
         """Return a serializable PWM state snapshot for the log record."""
@@ -1335,12 +1461,14 @@ class ControlManager:
         driver: LabjackDriver,
         *,
         now: Optional[dt.datetime] = None,
+        startup_pwm_ramp: bool = True,
     ) -> None:
         """Initialize controls into a safe hardware state.
 
         Relays are forced off before controller initialization. PWM outputs are
-        scheduled before hardware configuration so startup does not briefly
-        apply a stale duty cycle.
+        scheduled before hardware configuration so startup does not briefly use
+        stale duty state. By default, scheduled PWM outputs configure off first
+        and then ramp toward their current scheduled duty on subsequent updates.
         """
 
         now = now or dt.datetime.now().astimezone()
@@ -1356,11 +1484,15 @@ class ControlManager:
         for humidity_control in self.humidity_controls:
             humidity_control.initialize(driver, now=now)
 
-        # Initialize scheduled PWM outputs directly to their current scheduled
-        # state instead of briefly applying a stale/default duty cycle first.
+        # Scheduled LED/PWM outputs normally begin off and glide into the
+        # schedule target. Config reloads can opt out so changing a setting does
+        # not cause an unnecessary visual blink.
         for pwm in self.pwm_outputs:
-            pwm.apply_schedule(now=now)
-            pwm.configure_and_apply(driver)
+            if startup_pwm_ramp:
+                pwm.configure_startup_from_off(driver, now=now)
+            else:
+                pwm.apply_schedule(now=now)
+                pwm.configure_and_apply(driver)
 
     def update_schedules(
         self,
@@ -1496,10 +1628,15 @@ class SystemRuntime:
         self,
         *,
         now: Optional[dt.datetime] = None,
+        startup_pwm_ramp: bool = True,
     ) -> "SystemRuntime":
         """Initialize controls and sampling schedule after connecting."""
 
-        self.controls.initialize(self.driver, now=now)
+        self.controls.initialize(
+            self.driver,
+            now=now,
+            startup_pwm_ramp=startup_pwm_ramp,
+        )
         self.scheduler.reset()
         return self
 

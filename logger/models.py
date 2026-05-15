@@ -67,7 +67,7 @@ class PWMScheduleConfig(StrictModel):
     """Daily schedule for a PWM output.
 
     The schedule defines a local-time window, a minimum and maximum duty cycle,
-    and an optional ramp from minimum to maximum at the start of the window.
+    and an optional ramp at both the start and end of the active window.
     """
 
     name: str = "default"
