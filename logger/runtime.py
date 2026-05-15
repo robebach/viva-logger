@@ -762,6 +762,7 @@ class HumidityControlRuntime:
     pulse_started_rh_pct: Optional[float] = field(init=False, default=None)
     pulse_target_rh_pct: Optional[float] = field(init=False, default=None)
     pulse_trigger_rh_pct: Optional[float] = field(init=False, default=None)
+    pulse_max_pulse_s: Optional[float] = field(init=False, default=None)
 
     last_pulse_ended_at: Optional[dt.datetime] = field(init=False, default=None)
     last_pulse_duration_s: Optional[float] = field(init=False, default=None)
@@ -795,6 +796,11 @@ class HumidityControlRuntime:
         self.phase = "idle"
         self.active_window_key = None
         self.pulse_count_in_window = 0
+        self.pulse_started_at = None
+        self.pulse_started_rh_pct = None
+        self.pulse_target_rh_pct = None
+        self.pulse_trigger_rh_pct = None
+        self.pulse_max_pulse_s = None
         self.relay.set_state(1, driver=driver)
         self.status = {
             "enabled": self.config.enabled,
@@ -858,7 +864,14 @@ class HumidityControlRuntime:
             )
             return
 
-        schedule, start_at, end_at, target_rh_pct, trigger_below_rh_pct = active
+        (
+            schedule,
+            start_at,
+            end_at,
+            target_rh_pct,
+            trigger_below_rh_pct,
+            max_pulse_s,
+        ) = active
         window_key = f"{schedule.name}:{start_at.isoformat()}:{end_at.isoformat()}"
 
         if window_key != self.active_window_key:
@@ -867,6 +880,9 @@ class HumidityControlRuntime:
             self.phase = "idle"
             self.pulse_started_at = None
             self.pulse_started_rh_pct = None
+            self.pulse_target_rh_pct = None
+            self.pulse_trigger_rh_pct = None
+            self.pulse_max_pulse_s = None
 
         schedule_info = active
 
@@ -890,6 +906,7 @@ class HumidityControlRuntime:
                 rh_pct=rh_pct,
                 target_rh_pct=target_rh_pct,
                 trigger_below_rh_pct=trigger_below_rh_pct,
+                max_pulse_s=max_pulse_s,
                 schedule_info=schedule_info,
             )
             return
@@ -901,6 +918,7 @@ class HumidityControlRuntime:
                 rh_pct=rh_pct,
                 target_rh_pct=target_rh_pct,
                 trigger_below_rh_pct=trigger_below_rh_pct,
+                max_pulse_s=max_pulse_s,
                 schedule_info=schedule_info,
             ):
                 return
@@ -937,6 +955,7 @@ class HumidityControlRuntime:
                 rh_pct=rh_pct,
                 target_rh_pct=target_rh_pct,
                 trigger_below_rh_pct=trigger_below_rh_pct,
+                max_pulse_s=max_pulse_s,
                 schedule_info=schedule_info,
                 reason="below_trigger",
             )
@@ -959,10 +978,12 @@ class HumidityControlRuntime:
         rh_pct: float,
         target_rh_pct: float,
         trigger_below_rh_pct: float,
+        max_pulse_s: float,
         schedule_info: tuple[
             HumidityScheduleConfig,
             dt.datetime,
             dt.datetime,
+            float,
             float,
             float,
         ],
@@ -1000,7 +1021,7 @@ class HumidityControlRuntime:
             )
             return
 
-        if elapsed_s >= self.config.max_pulse_s:
+        if elapsed_s >= max_pulse_s:
             self._finish_pulse(
                 driver=driver,
                 now=now,
@@ -1039,10 +1060,12 @@ class HumidityControlRuntime:
         rh_pct: float,
         target_rh_pct: float,
         trigger_below_rh_pct: float,
+        max_pulse_s: float,
         schedule_info: tuple[
             HumidityScheduleConfig,
             dt.datetime,
             dt.datetime,
+            float,
             float,
             float,
         ],
@@ -1120,6 +1143,7 @@ class HumidityControlRuntime:
                 rh_pct=rh_pct,
                 target_rh_pct=target_rh_pct,
                 trigger_below_rh_pct=trigger_below_rh_pct,
+                max_pulse_s=max_pulse_s,
                 schedule_info=schedule_info,
                 reason="below_target_after_settle",
             )
@@ -1136,10 +1160,12 @@ class HumidityControlRuntime:
         rh_pct: float,
         target_rh_pct: float,
         trigger_below_rh_pct: float,
+        max_pulse_s: float,
         schedule_info: tuple[
             HumidityScheduleConfig,
             dt.datetime,
             dt.datetime,
+            float,
             float,
             float,
         ],
@@ -1153,6 +1179,7 @@ class HumidityControlRuntime:
         self.pulse_started_rh_pct = rh_pct
         self.pulse_target_rh_pct = target_rh_pct
         self.pulse_trigger_rh_pct = trigger_below_rh_pct
+        self.pulse_max_pulse_s = max_pulse_s
         self.relay.set_state(0, driver=driver)
 
         self._set_status(
@@ -1162,6 +1189,7 @@ class HumidityControlRuntime:
             schedule_info=schedule_info,
             target_rh_pct=target_rh_pct,
             trigger_below_rh_pct=trigger_below_rh_pct,
+            max_pulse_s=max_pulse_s,
             current_pulse_elapsed_s=0.0,
             current_pulse_delta_rh_pct=0.0,
             start_reason=reason,
@@ -1203,6 +1231,7 @@ class HumidityControlRuntime:
             "pulse_delta_rh_pct": delta_rh_pct,
             "target_rh_pct": self.pulse_target_rh_pct,
             "trigger_below_rh_pct": self.pulse_trigger_rh_pct,
+            "max_pulse_s": self.pulse_max_pulse_s,
             "stop_reason": reason,
             "pulse_number_in_window": self.pulse_count_in_window,
         }
@@ -1253,6 +1282,63 @@ class HumidityControlRuntime:
         }:
             self.phase = "idle"
 
+    def _active_alarms(
+        self,
+        *,
+        mode: str,
+        rh_pct: Optional[float],
+        target_rh_pct: Optional[float],
+    ) -> list[dict[str, object]]:
+        """Return humidity alarm records for the current controller state."""
+
+        alarms: list[dict[str, object]] = []
+
+        if mode == "max_consecutive_pulses":
+            alarms.append({
+                "kind": "max_consecutive_pulses",
+                "message": "Mister hit its consecutive-pulse limit.",
+                "pulse_count_in_window": self.pulse_count_in_window,
+                "max_consecutive_pulses": self.config.max_consecutive_pulses,
+            })
+
+        if (
+            self.last_event
+            and self.last_event.get("low_response")
+            and rh_pct is not None
+            and target_rh_pct is not None
+            and rh_pct < target_rh_pct
+        ):
+            alarms.append({
+                "kind": "low_mist_response",
+                "message": "RH stayed low after a mist pulse.",
+                "settled_delta_rh_pct": self.last_event.get("settled_delta_rh_pct"),
+                "low_response_delta_rh_pct": self.config.low_response_delta_rh_pct,
+            })
+
+        drying_threshold = self.config.drying_alarm_rate_rh_pct_per_hour
+        drying_rate = self.drying_rate_rh_pct_per_hour_ema
+        if (
+            drying_threshold is not None
+            and drying_rate is not None
+            and rh_pct is not None
+            and target_rh_pct is not None
+            and rh_pct <= target_rh_pct - self.config.drying_alarm_below_target_rh_pct
+            and drying_rate >= drying_threshold
+        ):
+            alarms.append({
+                "kind": "drying_fast",
+                "message": "RH is below target and falling faster than expected.",
+                "rh_pct": rh_pct,
+                "target_rh_pct": target_rh_pct,
+                "drying_rate_rh_pct_per_hour_ema": drying_rate,
+                "drying_alarm_rate_rh_pct_per_hour": drying_threshold,
+                "drying_alarm_below_target_rh_pct": (
+                    self.config.drying_alarm_below_target_rh_pct
+                ),
+            })
+
+        return alarms
+
     def _set_status(
         self,
         *,
@@ -1260,10 +1346,11 @@ class HumidityControlRuntime:
         now: dt.datetime,
         rh_pct: Optional[float],
         schedule_info: Optional[
-            tuple[HumidityScheduleConfig, dt.datetime, dt.datetime, float, float]
+            tuple[HumidityScheduleConfig, dt.datetime, dt.datetime, float, float, float]
         ],
         target_rh_pct: Optional[float] = None,
         trigger_below_rh_pct: Optional[float] = None,
+        max_pulse_s: Optional[float] = None,
         **extra: object,
     ) -> None:
         """Build the diagnostic status payload emitted in control snapshots."""
@@ -1273,7 +1360,14 @@ class HumidityControlRuntime:
         window_end = None
 
         if schedule_info is not None:
-            schedule, start_at, end_at, active_target, active_trigger = schedule_info
+            (
+                schedule,
+                start_at,
+                end_at,
+                active_target,
+                active_trigger,
+                active_max_pulse_s,
+            ) = schedule_info
             schedule_name = schedule.name
             window_start = start_at.isoformat()
             window_end = end_at.isoformat()
@@ -1283,6 +1377,14 @@ class HumidityControlRuntime:
                 if trigger_below_rh_pct is None
                 else trigger_below_rh_pct
             )
+            max_pulse_s = active_max_pulse_s if max_pulse_s is None else max_pulse_s
+
+        max_pulse_s = self.config.max_pulse_s if max_pulse_s is None else max_pulse_s
+        alarms = self._active_alarms(
+            mode=mode,
+            rh_pct=rh_pct,
+            target_rh_pct=target_rh_pct,
+        )
 
         self.status = {
             "enabled": self.config.enabled,
@@ -1298,7 +1400,7 @@ class HumidityControlRuntime:
             "window_end": window_end,
             "relay_name": self.relay.name,
             "relay_state": self.relay.state,
-            "max_pulse_s": self.config.max_pulse_s,
+            "max_pulse_s": max_pulse_s,
             "settle_s": self.config.settle_s,
             "min_off_s": self.config.min_off_s,
             "pulse_count_in_window": self.pulse_count_in_window,
@@ -1308,6 +1410,15 @@ class HumidityControlRuntime:
                 self.drying_rate_rh_pct_per_hour_ema
             ),
             "last_event": self.last_event,
+            "alarms": alarms,
+            "alarm": bool(alarms),
+            "alarm_count": len(alarms),
+            "drying_alarm_rate_rh_pct_per_hour": (
+                self.config.drying_alarm_rate_rh_pct_per_hour
+            ),
+            "drying_alarm_below_target_rh_pct": (
+                self.config.drying_alarm_below_target_rh_pct
+            ),
             "updated_at": now.isoformat(),
         }
         self.status.update(extra)
@@ -1315,7 +1426,9 @@ class HumidityControlRuntime:
     def _active_schedule(
         self,
         now: dt.datetime,
-    ) -> Optional[tuple[HumidityScheduleConfig, dt.datetime, dt.datetime, float, float]]:
+    ) -> Optional[
+        tuple[HumidityScheduleConfig, dt.datetime, dt.datetime, float, float, float]
+    ]:
         """Return the active humidity schedule and derived target/trigger.
 
         Disabled schedules are ignored. Overlapping active schedules resolve to
@@ -1324,7 +1437,7 @@ class HumidityControlRuntime:
         """
 
         candidates: list[
-            tuple[HumidityScheduleConfig, dt.datetime, dt.datetime, float, float]
+            tuple[HumidityScheduleConfig, dt.datetime, dt.datetime, float, float, float]
         ] = []
 
         for schedule in self.config.schedules:
@@ -1347,6 +1460,7 @@ class HumidityControlRuntime:
 
             trigger_below_rh_pct = self._clamp_pct(trigger_below_rh_pct)
             trigger_below_rh_pct = min(trigger_below_rh_pct, target_rh_pct)
+            max_pulse_s = schedule.max_pulse_s or self.config.max_pulse_s
 
             candidates.append((
                 schedule,
@@ -1354,6 +1468,7 @@ class HumidityControlRuntime:
                 end_at,
                 target_rh_pct,
                 trigger_below_rh_pct,
+                max_pulse_s,
             ))
 
         if not candidates:

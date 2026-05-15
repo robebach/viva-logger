@@ -124,6 +124,8 @@ class HumidityScheduleConfig(StrictModel):
     # subject to pulse, settling, and safety limits.
     target_rh_pct: float = Field(..., ge=0.0, le=100.0)
     trigger_below_rh_pct: Optional[float] = Field(None, ge=0.0, le=100.0)
+    # Optional per-window override for HumidityControlConfig.max_pulse_s.
+    max_pulse_s: Optional[float] = Field(None, gt=0.0)
 
 
 class HumidityControlConfig(StrictModel):
@@ -158,6 +160,10 @@ class HumidityControlConfig(StrictModel):
     # can indicate poor mixing, an empty mister, excess ventilation, or a
     # very dry system absorbing water quickly.
     low_response_delta_rh_pct: float = Field(0.5, ge=0.0, le=100.0)
+    # Optional drying alarm. The alarm fires when RH is this far below target
+    # and the falling-RH EMA exceeds the configured rate.
+    drying_alarm_rate_rh_pct_per_hour: Optional[float] = Field(None, gt=0.0)
+    drying_alarm_below_target_rh_pct: float = Field(5.0, ge=0.0, le=100.0)
 
 
 # ----------------------------

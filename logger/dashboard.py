@@ -170,6 +170,8 @@ def default_numeric_selection(columns: list[str]) -> list[str]:
         "sensor:temp-rh:vpd_kpa",
         "control:penelope-mister:target_rh_pct",
         "control:penelope-mister:trigger_below_rh_pct",
+        "control:penelope-mister:max_pulse_s",
+        "control:penelope-mister:alarm_count",
         "control:led-0-10v:output_duty_cycle",
         "control:misting-pump-eio4:onoff",
         "errors:count",
@@ -187,6 +189,8 @@ def default_numeric_selection(columns: list[str]) -> list[str]:
         ":relay_state",
         ":target_rh_pct",
         ":trigger_below_rh_pct",
+        ":max_pulse_s",
+        ":alarm_count",
         "errors:count",
     )
     selected.extend(
@@ -343,6 +347,11 @@ def active_humidity_config_values(
                     "schedule": schedule.name,
                     "target_rh_pct": target_rh_pct,
                     "trigger_below_rh_pct": trigger_below_rh_pct,
+                    "max_pulse_s": (
+                        schedule.max_pulse_s
+                        if schedule.max_pulse_s is not None
+                        else control.max_pulse_s
+                    ),
                 })
 
         if candidates:
@@ -778,6 +787,16 @@ def create_app(
             ":trigger_below_rh_pct",
             preferred_prefix="control:penelope-mister:",
         )
+        max_pulse = latest_value(
+            frame,
+            ":max_pulse_s",
+            preferred_prefix="control:penelope-mister:",
+        )
+        alarm_count = latest_value(
+            frame,
+            ":alarm_count",
+            preferred_prefix="control:penelope-mister:",
+        )
         active_schedule = latest_value(
             frame,
             ":active_schedule",
@@ -797,16 +816,21 @@ def create_app(
 
         config_target = None
         config_trigger = None
+        config_max_pulse = None
         config_schedule = None
-        target_detail = f"trigger {format_number(trigger)}%"
+        target_detail = (
+            f"trigger {format_number(trigger)}%, pulse {format_number(max_pulse, 0)}s"
+        )
         if config_values is not None:
             config_target = config_values.get("target_rh_pct")
             config_trigger = config_values.get("trigger_below_rh_pct")
+            config_max_pulse = config_values.get("max_pulse_s")
             config_schedule = config_values.get("schedule")
             target_detail = (
                 f"log {active_schedule}, trigger {format_number(trigger)}%; "
                 f"config {config_schedule} {format_number(config_target)}%"
-                f"/{format_number(config_trigger)}%"
+                f"/{format_number(config_trigger)}%, "
+                f"pulse {format_number(config_max_pulse, 0)}s"
             )
             try:
                 if abs(float(target) - float(config_target)) > 0.001:
@@ -814,7 +838,10 @@ def create_app(
             except (TypeError, ValueError):
                 pass
         elif active_schedule is not None:
-            target_detail = f"{active_schedule}, trigger {format_number(trigger)}%"
+            target_detail = (
+                f"{active_schedule}, trigger {format_number(trigger)}%, "
+                f"pulse {format_number(max_pulse, 0)}s"
+            )
 
         cards = html.Div(
             style={
@@ -840,7 +867,10 @@ def create_app(
                 metric_card(
                     "Mister",
                     mister_mode,
-                    f"phase {mister_phase}, relay {relay}",
+                    (
+                        f"phase {mister_phase}, relay {relay}, "
+                        f"alarms {format_number(alarm_count, 0)}"
+                    ),
                 ),
                 metric_card(
                     "Logged target",
@@ -1252,6 +1282,21 @@ def create_app(
                     maximum=100.0,
                     step=0.1,
                 ),
+                config_field(
+                    f"humidity_controls.{control_index}.drying_alarm_rate_rh_pct_per_hour",
+                    "Drying alarm (%/hr)",
+                    control.get("drying_alarm_rate_rh_pct_per_hour"),
+                    minimum=0.1,
+                    step=1.0,
+                ),
+                config_field(
+                    f"humidity_controls.{control_index}.drying_alarm_below_target_rh_pct",
+                    "Alarm below target (%)",
+                    control.get("drying_alarm_below_target_rh_pct"),
+                    minimum=0.0,
+                    maximum=100.0,
+                    step=1.0,
+                ),
             ]
 
             for schedule_index, schedule in enumerate(control.get("schedules") or []):
@@ -1289,6 +1334,13 @@ def create_app(
                         schedule.get("trigger_below_rh_pct"),
                         minimum=0.0,
                         maximum=100.0,
+                        step=1.0,
+                    ),
+                    config_field(
+                        f"{base}.max_pulse_s",
+                        f"{schedule.get('name')} max pulse (s)",
+                        schedule.get("max_pulse_s"),
+                        minimum=0.1,
                         step=1.0,
                     ),
                 ])

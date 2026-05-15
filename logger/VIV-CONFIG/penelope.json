@@ -46,8 +46,8 @@
           "end_time": "20:00:00",
           "min_duty_cycle": 0.03,
           "max_duty_cycle": 0.4,
-          "ramp_duration_s": 60.0,
-          "outside_duty_cycle": 0.0
+          "ramp_duration_s": 240.0,
+          "outside_duty_cycle": 0.04
         }
       ],
       "roll_value": null
@@ -62,28 +62,32 @@
       "schedules": [
         {
           "name": "day-background",
-          "start_time": "06:00:00",
+          "start_time": "05:00:00",
           "end_time": "20:00:00",
           "enabled": true,
-          "target_rh_pct": 50.0,
-          "trigger_below_rh_pct": 40.0
+          "target_rh_pct": 52.0,
+          "trigger_below_rh_pct": 42.0,
+          "max_pulse_s": 10.0
         },
         {
           "name": "night-humidity",
           "start_time": "20:00:00",
-          "end_time": "06:00:00",
+          "end_time": "05:00:00",
           "enabled": true,
-          "target_rh_pct": 70.0,
-          "trigger_below_rh_pct": 60.0
+          "target_rh_pct": 72.0,
+          "trigger_below_rh_pct": 65.0,
+          "max_pulse_s": 30.0
         }
       ],
-      "max_pulse_s": 20.0,
+      "max_pulse_s": 30.0,
       "settle_s": 300.0,
       "min_off_s": 30.0,
       "default_hysteresis_rh_pct": 4.0,
       "hard_max_rh_pct": 85.0,
       "max_consecutive_pulses": 6,
-      "low_response_delta_rh_pct": 0.5
+      "low_response_delta_rh_pct": 0.5,
+      "drying_alarm_rate_rh_pct_per_hour": 75.0,
+      "drying_alarm_below_target_rh_pct": 6.0
     }
   ]
 }
