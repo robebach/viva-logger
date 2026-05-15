@@ -52,24 +52,34 @@ poetry run python -m examples.penelope_minimal
 
 `examples/penelope_full.py` is the fuller Penelope configuration:
 
-- LED PWM runs on a daily window from 08:00 to 20:00.
-- LED duty cycle ramps from `0.03` to `0.30` over one hour.
-- LED duty cycle returns to `0.0` outside the daylight window.
+- LED PWM runs on a daily window from 06:00 to 20:00 in the Python defaults.
+- LED duty cycle ramps from `0.03` to `0.40`, and eases back down at the end
+  of the daylight window.
+- LED duty cycle returns to the configured outside-window duty outside the
+  daylight window.
 - The mister relay is controlled by `HumidityControlRuntime`.
 - Day and night humidity targets use separate schedules.
-- Misting happens in bounded pulses with settle time, minimum off time, a hard
-  RH guard, and a consecutive-pulse limit.
+- Misting happens in bounded schedule-specific pulses with settle time,
+  minimum off time, a hard RH guard, and a consecutive-pulse limit.
+- The humidity controller can log alarms for unusually fast drying, weak mist
+  response, or repeated pulses that still do not reach target.
 
 Run it only after checking wiring and setpoints:
 
 ```bash
-poetry run python -m examples.penelope_full
+poetry run python -m examples.penelope_full --config VIV-CONFIG/penelope.json
 ```
 
 The setpoints in the example are starting values for software configuration,
 not a universal animal-care prescription. Calibrate the sensor location, LED
 dimmer response, misting response, and actual husbandry targets before leaving
 hardware unattended.
+
+When run with `--config`, the Penelope runtime creates the JSON config file if
+it is missing and hot-reloads it between samples when the file changes. If the
+JSON file already exists, those values are used instead of the Python defaults;
+edit the JSON/dashboard settings, delete the file, or run with
+`--no-config-file` to use the Python defaults directly.
 
 ## Configuration Model
 
@@ -114,10 +124,13 @@ Errors from individual sensors or controls are captured in the record's
 ## Dashboard
 
 The package includes a local Dash app for watching a JSONL log file while the
-logger writes to it.
+logger writes to it. It can also edit the same JSON config file used by
+`examples.penelope_full`.
 
 ```bash
-poetry run python -m logger.dashboard --log VIV-LOGS/2026-05-13.jsonl
+poetry run python -m logger.dashboard \
+  --log VIV-LOGS/2026-05-13.jsonl \
+  --config VIV-CONFIG/penelope.json
 ```
 
 Then open:
@@ -128,13 +141,19 @@ http://127.0.0.1:8050
 
 The dashboard has a readout tab for the newest record and a trends tab for
 sensor values, relay states, PWM state, humidity-controller state, and errors.
-It refreshes every 5 seconds by default.
+It refreshes every 5 seconds by default. The config tab can edit operational
+settings such as schedule times, LED duty ranges, humidity targets/triggers,
+schedule-specific mister pulse lengths, drying alarm thresholds, and mister
+pulse safety limits.
 
 On a Raspberry Pi, bind to all interfaces if you want to view it from another
 computer on the same network:
 
 ```bash
-poetry run python -m logger.dashboard --host 0.0.0.0 --log VIV-LOGS/2026-05-13.jsonl
+poetry run python -m logger.dashboard \
+  --host 0.0.0.0 \
+  --log VIV-LOGS/2026-05-13.jsonl \
+  --config VIV-CONFIG/penelope.json
 ```
 
 Then browse to `http://penelope-pi.local:8050` or the Pi's IP address.
