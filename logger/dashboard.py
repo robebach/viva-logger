@@ -15,8 +15,9 @@ from .config_files import load_logger_config, save_logger_config
 from .models import LoggerConfig
 
 
-DEFAULT_LOG_DIR = Path("VIV-LOGS")
-DEFAULT_CONFIG_PATH = Path("VIV-CONFIG/penelope.json")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_LOG_DIR = PROJECT_ROOT / "VIV-LOGS"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "VIV-CONFIG" / "penelope.json"
 DEFAULT_MAX_RECORDS = 2_000
 DEFAULT_REFRESH_MS = 5_000
 
@@ -98,11 +99,13 @@ def records_to_frame(records: Iterable[dict[str, Any]]) -> pd.DataFrame:
         return pd.DataFrame()
 
     frame = pd.DataFrame(rows)
+    local_tz = dt.datetime.now().astimezone().tzinfo
     frame["timestamp"] = pd.to_datetime(
         frame["timestamp"],
         utc=True,
         errors="coerce",
     )
+    frame["timestamp"] = frame["timestamp"].dt.tz_convert(local_tz)
     frame = frame.dropna(subset=["timestamp"])
     return frame.sort_values("timestamp").reset_index(drop=True)
 
@@ -823,7 +826,7 @@ def create_app(
                 metric_card(
                     "Last sample",
                     timestamp.strftime("%H:%M:%S"),
-                    timestamp.strftime("%Y-%m-%d UTC"),
+                    timestamp.strftime("%Y-%m-%d %Z"),
                 ),
                 metric_card(
                     "Device",
@@ -1418,7 +1421,7 @@ def create_app(
             latest = frame.iloc[-1]
             status = (
                 f"{current_path} | {len(frame)} records | "
-                f"newest {latest['timestamp'].strftime('%Y-%m-%d %H:%M:%S UTC')} | "
+                f"newest {latest['timestamp'].strftime('%Y-%m-%d %H:%M:%S %Z')} | "
                 f"errors {int(latest.get('errors:count', 0) or 0)}"
             )
 

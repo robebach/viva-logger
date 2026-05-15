@@ -384,6 +384,8 @@ class PWMRuntime:
         driver.set_pwm(
             dio=self.config.dio,
             duty_cycle=self.output_duty_cycle,
+            frequency_hz=self.config.frequency_hz,
+            roll_value=self.config.roll_value,
         )
 
     def set_duty_cycle(
@@ -456,36 +458,61 @@ class PWMRuntime:
         *,
         now: Optional[dt.datetime] = None,
     ) -> None:
-        """Configure PWM off and ramp toward the current scheduled duty.
+        """Start PWM gently and ramp toward the current scheduled duty.
 
-        This avoids a startup jump when the logger boots during an active LED
-        schedule. Outputs without schedules, disabled outputs, or schedules
-        with a zero target are configured directly.
+        If the LabJack already has PWM running on this DIO, the runtime resumes
+        from the current hardware duty without fully reconfiguring the DIO_EF
+        output. If not, it configures the output off and ramps from there.
         """
 
         now = now or dt.datetime.now().astimezone()
         now = self._normalize_now(now)
+        current_output_duty_cycle = driver.read_pwm_duty_cycle(
+            dio=self.config.dio,
+            frequency_hz=self.config.frequency_hz,
+            roll_value=self.config.roll_value,
+        )
         scheduled = self.scheduled_duty_cycle(now=now)
 
         if scheduled is None:
             self._clear_startup_ramp()
-            self.configure_and_apply(driver)
+            if current_output_duty_cycle is None:
+                self.configure_and_apply(driver)
+            else:
+                self.apply(driver)
             return
 
         target_duty_cycle, status = scheduled
         ramp_duration_s = float(status.get("effective_ramp_duration_s", 0.0) or 0.0)
+        startup_from_duty_cycle = (
+            0.0
+            if current_output_duty_cycle is None
+            else current_output_duty_cycle
+        )
+        startup_source = "off" if current_output_duty_cycle is None else "existing_pwm"
+        should_ramp = (
+            self.enabled
+            and ramp_duration_s > 0.0
+            and abs(target_duty_cycle - startup_from_duty_cycle) > 0.0005
+        )
 
-        if not self.enabled or target_duty_cycle <= 0.0 or ramp_duration_s <= 0.0:
+        if not should_ramp:
             self._clear_startup_ramp()
             self.duty_cycle = target_duty_cycle
-            self.schedule_status = status
-            self.configure_and_apply(driver)
+            self.schedule_status = {
+                **status,
+                "startup_source": startup_source,
+            }
+            if current_output_duty_cycle is None:
+                self.configure_and_apply(driver)
+            else:
+                self.apply(driver)
             return
 
         self.startup_ramp_started_at = now
-        self.startup_ramp_from_duty_cycle = 0.0
+        self.startup_ramp_from_duty_cycle = startup_from_duty_cycle
         self.startup_ramp_duration_s = ramp_duration_s
-        self.duty_cycle = 0.0
+        self.duty_cycle = startup_from_duty_cycle
         self.schedule_status = {
             **status,
             "mode": "startup_ramping",
@@ -493,10 +520,12 @@ class PWMRuntime:
             "startup_ramp_elapsed_s": 0.0,
             "startup_ramp_duration_s": ramp_duration_s,
             "startup_ramp_fraction": 0.0,
-            "startup_ramp_from_duty_cycle": 0.0,
+            "startup_ramp_from_duty_cycle": startup_from_duty_cycle,
             "startup_ramp_target_duty_cycle": target_duty_cycle,
+            "startup_source": startup_source,
         }
-        self.configure_and_apply(driver)
+        if current_output_duty_cycle is None:
+            self.configure_and_apply(driver)
 
     def scheduled_duty_cycle(
         self,
@@ -1678,7 +1707,7 @@ class SystemRuntime:
         )
 
         return LogRecord(
-            timestamp=dt.datetime.now(dt.timezone.utc),
+            timestamp=dt.datetime.now().astimezone(),
             device=device,
             sensors=sensor_readings,
             controls=self.controls.snapshots(),

@@ -18,6 +18,21 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _pwm_roll_value(
+    *,
+    frequency_hz: float = 1000.0,
+    roll_value: Optional[int] = None,
+) -> int:
+    """Return the LabJack PWM roll value for a requested frequency."""
+
+    if roll_value is not None:
+        return roll_value
+
+    # LabJack T-series base clock assumption.
+    # 80 MHz / 80_000 = 1 kHz.
+    return max(2, int(80_000_000 / frequency_hz))
+
+
 class LabjackDriver:
     """
     Hardware-facing LabJack driver.
@@ -142,9 +157,10 @@ class LabjackDriver:
 
         duty_cycle = _clamp01(duty_cycle)
 
-        # LabJack T-series base clock assumption.
-        # 80 MHz / 80_000 = 1 kHz.
-        roll = roll_value or max(2, int(80_000_000 / frequency_hz))
+        roll = _pwm_roll_value(
+            frequency_hz=frequency_hz,
+            roll_value=roll_value,
+        )
 
         self._pwm_roll_values[dio] = roll
 
@@ -165,19 +181,78 @@ class LabjackDriver:
 
         self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_ENABLE", 1)
 
-    def set_pwm(self, *, dio: int, duty_cycle: float) -> None:
+    def set_pwm(
+        self,
+        *,
+        dio: int,
+        duty_cycle: float,
+        frequency_hz: float = 1000.0,
+        roll_value: Optional[int] = None,
+    ) -> None:
         """Update the duty cycle for a previously configured PWM output."""
 
         self._require_connection()
 
         duty_cycle = _clamp01(duty_cycle)
-        roll = self._pwm_roll_values.get(dio, 80_000)
+        roll = self._pwm_roll_values.get(dio)
+        if roll is None:
+            roll = _pwm_roll_value(
+                frequency_hz=frequency_hz,
+                roll_value=roll_value,
+            )
+            self._pwm_roll_values[dio] = roll
 
         self._ljm.eWriteName(
             self.handle,
             f"DIO{dio}_EF_CONFIG_A",
             int(duty_cycle * roll),
         )
+
+    def read_pwm_duty_cycle(
+        self,
+        *,
+        dio: int,
+        frequency_hz: float = 1000.0,
+        roll_value: Optional[int] = None,
+    ) -> Optional[float]:
+        """Return current PWM duty when DIO_EF PWM is already enabled.
+
+        ``None`` means the pin does not appear to be running PWM or the current
+        configuration could not be read safely.
+        """
+
+        self._require_connection()
+
+        try:
+            enabled = int(self._ljm.eReadName(self.handle, f"DIO{dio}_EF_ENABLE"))
+            index = int(self._ljm.eReadName(self.handle, f"DIO{dio}_EF_INDEX"))
+        except Exception:
+            return None
+
+        if not enabled or index != 0:
+            return None
+
+        try:
+            config_a = float(self._ljm.eReadName(self.handle, f"DIO{dio}_EF_CONFIG_A"))
+            roll = float(self._ljm.eReadName(self.handle, "DIO_EF_CLOCK0_ROLL_VALUE"))
+        except Exception:
+            roll = float(_pwm_roll_value(
+                frequency_hz=frequency_hz,
+                roll_value=roll_value,
+            ))
+            try:
+                config_a = float(self._ljm.eReadName(
+                    self.handle,
+                    f"DIO{dio}_EF_CONFIG_A",
+                ))
+            except Exception:
+                return None
+
+        if roll <= 0:
+            return None
+
+        self._pwm_roll_values[dio] = int(roll)
+        return _clamp01(config_a / roll)
 
     def set_relay(self, *, dio: int, state: int) -> None:
         """Write a digital output used by a relay board.
@@ -280,15 +355,41 @@ class MockLabjackDriver(LabjackDriver):
     ) -> None:
         """Record PWM configuration in memory."""
 
-        roll = roll_value or max(2, int(80_000_000 / frequency_hz))
+        roll = _pwm_roll_value(
+            frequency_hz=frequency_hz,
+            roll_value=roll_value,
+        )
 
         self._pwm_roll_values[dio] = roll
         self.pwm_states[dio] = _clamp01(duty_cycle)
 
-    def set_pwm(self, *, dio: int, duty_cycle: float) -> None:
+    def set_pwm(
+        self,
+        *,
+        dio: int,
+        duty_cycle: float,
+        frequency_hz: float = 1000.0,
+        roll_value: Optional[int] = None,
+    ) -> None:
         """Record a PWM duty-cycle update in memory."""
 
+        if dio not in self._pwm_roll_values:
+            self._pwm_roll_values[dio] = _pwm_roll_value(
+                frequency_hz=frequency_hz,
+                roll_value=roll_value,
+            )
         self.pwm_states[dio] = _clamp01(duty_cycle)
+
+    def read_pwm_duty_cycle(
+        self,
+        *,
+        dio: int,
+        frequency_hz: float = 1000.0,
+        roll_value: Optional[int] = None,
+    ) -> Optional[float]:
+        """Return recorded PWM duty if the mock output is configured."""
+
+        return self.pwm_states.get(dio)
 
     def set_relay(self, *, dio: int, state: int) -> None:
         """Record a relay DIO state in memory."""
