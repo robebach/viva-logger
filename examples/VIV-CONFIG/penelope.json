@@ -45,9 +45,12 @@
           "start_time": "06:00:00",
           "end_time": "20:00:00",
           "min_duty_cycle": 0.03,
-          "max_duty_cycle": 0.4,
+          "max_duty_cycle": 1.0,
           "ramp_duration_s": 60.0,
-          "outside_duty_cycle": 0.03
+          "outside_duty_cycle": 0.03,
+          "weather_modulation": true,
+          "weather_min_peak": 0.80,
+          "weather_max_peak": 1.00
         }
       ],
       "roll_value": null

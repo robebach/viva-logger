@@ -125,6 +125,90 @@ class CloudCoverModel:
     _cached_weather: Optional[dict[str, float]] = None
     _cache_expires_at: Optional[dt.datetime] = None
 
+    _cached_daily_forecast: Optional[dict[str, Any]] = None
+    _daily_cache_expires_at: Optional[dt.datetime] = None
+
+    def get_daily_forecast(self, now: Optional[dt.datetime] = None) -> dict[str, Any]:
+        """Fetch today's weather forecast (cloud cover mean %, precipitation sum mm).
+
+        Queries Open-Meteo API with a 1-hour in-memory cache to minimize network calls.
+        Falls back to 0% cloud cover (plants brightest, 100% full power) if offline.
+        """
+        now = now or dt.datetime.now().astimezone()
+        if (
+            self._cached_daily_forecast is not None
+            and self._daily_cache_expires_at is not None
+            and now < self._daily_cache_expires_at
+        ):
+            return {
+                **self._cached_daily_forecast,
+                "source": "cached",
+            }
+
+        if self.mode != "live_api":
+            return {
+                "cloud_cover_mean_pct": 20.0,
+                "precipitation_sum_mm": 0.0,
+                "source": "simulated",
+            }
+
+        try:
+            url = (
+                f"https://api.open-meteo.com/v1/forecast?"
+                f"latitude={self.latitude}&longitude={self.longitude}"
+                f"&daily=cloud_cover_mean,precipitation_sum&timezone=auto"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "VivaLogger/1.0"})
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                daily = data.get("daily", {})
+                cloud_list = daily.get("cloud_cover_mean", [])
+                precip_list = daily.get("precipitation_sum", [])
+                cloud_mean = float(cloud_list[0]) if cloud_list else 0.0
+                precip_sum = float(precip_list[0]) if precip_list else 0.0
+                result = {
+                    "cloud_cover_mean_pct": cloud_mean,
+                    "precipitation_sum_mm": precip_sum,
+                    "source": "live_api",
+                }
+                self._cached_daily_forecast = result
+                self._daily_cache_expires_at = now + dt.timedelta(hours=1)
+                return result
+        except Exception:
+            # Fallback gracefully to plants-brightest (0% cloud reduction)
+            return {
+                "cloud_cover_mean_pct": 0.0,
+                "precipitation_sum_mm": 0.0,
+                "source": "fallback_plants_brightest",
+            }
+
+    def compute_daily_peak_duty(
+        self,
+        now: dt.datetime,
+        min_peak: float = 0.80,
+        max_peak: float = 1.00,
+    ) -> tuple[float, dict[str, Any]]:
+        """Calculate today's maximum daytime brightness based on weather forecast.
+
+        Maps daily cloud cover (0% to 100%) linearly between max_peak and min_peak:
+        - 0% cloud cover (crystal clear sun) -> max_peak (1.0 = 100% full 75W power)
+        - 100% cloud cover (heavy overcast) -> min_peak (0.8 = 80% power)
+        - Fallback on offline/error -> max_peak (1.0 = 100% full power, plants brightest)
+        """
+        forecast = self.get_daily_forecast(now)
+        cloud_pct = forecast.get("cloud_cover_mean_pct", 0.0)
+        clear_sky_fraction = max(0.0, min(1.0, 1.0 - (cloud_pct / 100.0)))
+        peak_duty = min_peak + (max_peak - min_peak) * clear_sky_fraction
+        peak_duty = max(min_peak, min(max_peak, peak_duty))
+        meta = {
+            "weather_modulated_peak_duty": round(peak_duty, 4),
+            "cloud_cover_forecast_pct": round(cloud_pct, 1),
+            "forecast_source": forecast.get("source"),
+            "min_peak": min_peak,
+            "max_peak": max_peak,
+        }
+        return peak_duty, meta
+
     def get_attenuation_factor(self, now: dt.datetime) -> float:
         """Return the light transmission factor (0.2 to 1.0) based on clouds.
 
@@ -183,6 +267,17 @@ class CloudCoverModel:
         except Exception:
             # Fall back smoothly to procedural simulation if network is unreachable
             return self._get_simulated_attenuation(now)
+
+
+_GLOBAL_LIVE_CLOUD_MODEL: Optional[CloudCoverModel] = None
+
+
+def get_live_cloud_model() -> CloudCoverModel:
+    """Return a shared singleton live cloud cover model."""
+    global _GLOBAL_LIVE_CLOUD_MODEL
+    if _GLOBAL_LIVE_CLOUD_MODEL is None:
+        _GLOBAL_LIVE_CLOUD_MODEL = CloudCoverModel(mode="live_api")
+    return _GLOBAL_LIVE_CLOUD_MODEL
 
 
 @dataclass

@@ -85,6 +85,11 @@ class PWMScheduleConfig(StrictModel):
     # the scheduled window.
     outside_duty_cycle: Optional[float] = Field(None, ge=0.0, le=1.0)
 
+    # Dynamic weather modulation based on cloud forecast (e.g. 0.80 to 1.00)
+    weather_modulation: bool = False
+    weather_min_peak: float = Field(0.80, ge=0.0, le=1.0)
+    weather_max_peak: float = Field(1.00, ge=0.0, le=1.0)
+
 
 class PWMConfig(StrictModel):
     """Configuration for one LabJack DIO_EF PWM output."""

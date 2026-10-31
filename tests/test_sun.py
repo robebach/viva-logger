@@ -56,3 +56,43 @@ def test_motorized_dimmer_stepper_angle():
     duty, angle = dimmer.compute_pwm_and_rotation(0.0)
     assert duty == 0.20
     assert abs(angle - 180.0) < 0.1
+
+
+def test_daily_weather_peak_duty():
+    model = CloudCoverModel(mode="simulated")
+    now = dt.datetime(2026, 10, 31, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+    # In simulated mode, cloud cover is 20% -> 80% clear sky
+    # peak duty = 0.80 + (1.00 - 0.80) * 0.80 = 0.96
+    duty, meta = model.compute_daily_peak_duty(now, min_peak=0.80, max_peak=1.00)
+    assert 0.80 <= duty <= 1.00
+    assert meta["min_peak"] == 0.80
+    assert meta["max_peak"] == 1.00
+    assert "cloud_cover_forecast_pct" in meta
+
+
+def test_pwm_weather_schedule():
+    from logger.models import PWMConfig, PWMScheduleConfig
+    from logger.runtime import PWMRuntime
+
+    schedule = PWMScheduleConfig(
+        name="test-weather-ramp",
+        start_time=dt.time(6, 0),
+        end_time=dt.time(20, 0),
+        min_duty_cycle=0.0,
+        max_duty_cycle=1.0,
+        ramp_duration_s=60.0,
+        weather_modulation=True,
+        weather_min_peak=0.80,
+        weather_max_peak=1.00,
+    )
+    config = PWMConfig(name="test-led", dio=6, schedules=[schedule])
+    pwm = PWMRuntime(config=config)
+
+    now_noon = dt.datetime(2026, 10, 31, 12, 0, 0)
+    res = pwm.scheduled_duty_cycle(now=now_noon)
+    assert res is not None
+    duty, status = res
+    assert 0.80 <= duty <= 1.00
+    assert status["mode"] == "max"
+    assert "cloud_cover_forecast_pct" in status or "weather_modulated_peak_duty" in status

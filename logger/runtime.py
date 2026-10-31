@@ -557,10 +557,25 @@ class PWMRuntime:
             is_active = start_at <= now < end_at
 
             min_duty = self._clamp01(schedule.min_duty_cycle)
-            max_duty = self._clamp01(schedule.max_duty_cycle)
+            configured_max_duty = self._clamp01(schedule.max_duty_cycle)
 
-            if max_duty < min_duty:
-                min_duty, max_duty = max_duty, min_duty
+            if configured_max_duty < min_duty:
+                min_duty, configured_max_duty = configured_max_duty, min_duty
+
+            max_duty = configured_max_duty
+            weather_meta: dict[str, object] = {}
+            if getattr(schedule, "weather_modulation", False):
+                try:
+                    from logger.sun import get_live_cloud_model
+                    cloud_model = get_live_cloud_model()
+                    min_peak = getattr(schedule, "weather_min_peak", 0.80)
+                    max_duty, weather_meta = cloud_model.compute_daily_peak_duty(
+                        now,
+                        min_peak=min_peak,
+                        max_peak=configured_max_duty,
+                    )
+                except Exception as exc:
+                    weather_meta = {"weather_error": str(exc)}
 
             outside_duty = schedule.outside_duty_cycle
             if outside_duty is None:
@@ -579,6 +594,8 @@ class PWMRuntime:
                     "ramp_duration_s": schedule.ramp_duration_s,
                     "min_duty_cycle": min_duty,
                     "max_duty_cycle": max_duty,
+                    "configured_max_duty_cycle": configured_max_duty,
+                    **weather_meta,
                 },
             ))
 
@@ -631,7 +648,9 @@ class PWMRuntime:
                     "ramp_fraction": ramp_fraction,
                     "min_duty_cycle": min_duty,
                     "max_duty_cycle": max_duty,
+                    "configured_max_duty_cycle": configured_max_duty,
                     "outside_duty_cycle": outside_duty,
+                    **weather_meta,
                 },
             ))
 
