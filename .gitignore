@@ -1,4 +1,13 @@
 LOGS/*
+**/LOGS/*
+LOGS_SMOKE/
+**/LOGS_SMOKE/*
+VIV-LOGS/*
+**/VIV-LOGS/*
+*.state.json
+.runtime_state.json
+.DS_Store
+*/.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

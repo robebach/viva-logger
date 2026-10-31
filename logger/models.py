@@ -152,6 +152,7 @@ class HumidityControlConfig(StrictModel):
     max_pulse_s: float = Field(30.0, gt=0.0)
     settle_s: float = Field(60.0, ge=0.0)
     min_off_s: float = Field(15.0, ge=0.0)
+    startup_grace_period_s: float = Field(180.0, ge=0.0)
     default_hysteresis_rh_pct: float = Field(2.0, ge=0.0, le=100.0)
     hard_max_rh_pct: float = Field(85.0, ge=0.0, le=100.0)
     max_consecutive_pulses: int = Field(8, ge=1)
@@ -221,6 +222,7 @@ class LoggerConfig(StrictModel):
     """Top-level configuration used to assemble a complete logger runtime."""
 
     log_dir: Path = Path("LOGS")
+    state_path: Optional[Path] = None
     sample_interval_s: float = Field(1.0, gt=0.0)
 
     device: LabjackConfig

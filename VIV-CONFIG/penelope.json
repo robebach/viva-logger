@@ -1,0 +1,93 @@
+{
+  "log_dir": "VIV-LOGS",
+  "sample_interval_s": 5.0,
+  "device": {
+    "device_type": "T4",
+    "serial_number": "ANY",
+    "connection_type": "ANY"
+  },
+  "sensors": [
+    {
+      "sensor_type": "device_temperature",
+      "name": "labjack"
+    },
+    {
+      "sensor_type": "t9602",
+      "name": "temp-rh",
+      "i2c": {
+        "sda_dio": 8,
+        "scl_dio": 9,
+        "address": 40,
+        "rx_len": 4,
+        "speed": 65536
+      }
+    }
+  ],
+  "relays": [
+    {
+      "name": "misting-pump-eio4",
+      "dio": 12,
+      "initial_state": 1,
+      "cycle_times": [],
+      "cycle_duration_s": 30.0
+    }
+  ],
+  "pwm_outputs": [
+    {
+      "name": "led-0-10v",
+      "dio": 6,
+      "frequency_hz": 1000.0,
+      "duty_cycle": 0.04,
+      "enabled": true,
+      "schedules": [
+        {
+          "name": "daylight-ramp",
+          "start_time": "06:00:00",
+          "end_time": "20:00:00",
+          "min_duty_cycle": 0.00,
+          "max_duty_cycle": 0.4,
+          "ramp_duration_s": 60.0,
+          "outside_duty_cycle": 0.00
+        }
+      ],
+      "roll_value": null
+    }
+  ],
+  "humidity_controls": [
+    {
+      "name": "penelope-mister",
+      "rh_sensor": "temp-rh",
+      "relay": "misting-pump-eio4",
+      "enabled": true,
+      "schedules": [
+        {
+          "name": "day-background",
+          "start_time": "05:00:00",
+          "end_time": "20:00:00",
+          "enabled": true,
+          "target_rh_pct": 52.0,
+          "trigger_below_rh_pct": 42.0,
+          "max_pulse_s": 8.0
+        },
+        {
+          "name": "night-humidity",
+          "start_time": "20:00:00",
+          "end_time": "05:00:00",
+          "enabled": true,
+          "target_rh_pct": 72.0,
+          "trigger_below_rh_pct": 65.0,
+          "max_pulse_s": 30.0
+        }
+      ],
+      "max_pulse_s": 30.0,
+      "settle_s": 300.0,
+      "min_off_s": 30.0,
+      "default_hysteresis_rh_pct": 4.0,
+      "hard_max_rh_pct": 85.0,
+      "max_consecutive_pulses": 6,
+      "low_response_delta_rh_pct": 0.5,
+      "drying_alarm_rate_rh_pct_per_hour": 75.0,
+      "drying_alarm_below_target_rh_pct": 6.0
+    }
+  ]
+}

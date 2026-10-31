@@ -11,10 +11,11 @@ from __future__ import annotations
 import datetime as dt
 import math
 import time
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from .hardware import LabjackDriver
 from .models import (
@@ -764,6 +765,7 @@ class HumidityControlRuntime:
     pulse_trigger_rh_pct: Optional[float] = field(init=False, default=None)
     pulse_max_pulse_s: Optional[float] = field(init=False, default=None)
 
+    startup_at: Optional[dt.datetime] = field(init=False, default=None)
     last_pulse_ended_at: Optional[dt.datetime] = field(init=False, default=None)
     last_pulse_duration_s: Optional[float] = field(init=False, default=None)
     last_pulse_end_rh_pct: Optional[float] = field(init=False, default=None)
@@ -785,13 +787,65 @@ class HumidityControlRuntime:
 
         return self.config.name
 
+    def export_state(self) -> dict[str, Any]:
+        """Export serializable runtime state for persistence across restarts."""
+
+        return {
+            "name": self.name,
+            "phase": self.phase,
+            "active_window_key": self.active_window_key,
+            "pulse_count_in_window": self.pulse_count_in_window,
+            "last_pulse_ended_at": self.last_pulse_ended_at.isoformat() if self.last_pulse_ended_at else None,
+            "last_pulse_duration_s": self.last_pulse_duration_s,
+            "last_pulse_end_rh_pct": self.last_pulse_end_rh_pct,
+            "last_rh_pct": self.last_rh_pct,
+            "last_event": self.last_event,
+        }
+
+    def _restore_from_state(self, state: dict[str, Any], *, now: dt.datetime) -> None:
+        """Restore previous state such as last pulse timestamp and pulse count."""
+
+        try:
+            if state.get("active_window_key"):
+                self.active_window_key = state["active_window_key"]
+            if "pulse_count_in_window" in state:
+                self.pulse_count_in_window = int(state["pulse_count_in_window"])
+            if state.get("last_pulse_duration_s") is not None:
+                self.last_pulse_duration_s = float(state["last_pulse_duration_s"])
+            if state.get("last_pulse_end_rh_pct") is not None:
+                self.last_pulse_end_rh_pct = float(state["last_pulse_end_rh_pct"])
+            if state.get("last_event"):
+                self.last_event = state["last_event"]
+
+            raw_ended_at = state.get("last_pulse_ended_at")
+            if raw_ended_at:
+                ended_at = dt.datetime.fromisoformat(raw_ended_at)
+                ended_at = self._normalize_now(ended_at)
+                self.last_pulse_ended_at = ended_at
+
+                elapsed_since_pulse = max(0.0, (now - ended_at).total_seconds())
+                required_wait_s = max(self.config.settle_s, self.config.min_off_s)
+                if elapsed_since_pulse < required_wait_s:
+                    self.phase = "settling"
+                else:
+                    self.phase = "idle"
+        except Exception:
+            self.phase = "idle"
+            self.pulse_count_in_window = 0
+            self.last_pulse_ended_at = None
+
     def initialize(
         self,
         driver: LabjackDriver,
         *,
         now: Optional[dt.datetime] = None,
+        restored_state: Optional[dict[str, Any]] = None,
     ) -> None:
         """Reset controller state and force the mister relay off."""
+
+        now = now or dt.datetime.now().astimezone()
+        now = self._normalize_now(now)
+        self.startup_at = now
 
         self.phase = "idle"
         self.active_window_key = None
@@ -801,13 +855,23 @@ class HumidityControlRuntime:
         self.pulse_target_rh_pct = None
         self.pulse_trigger_rh_pct = None
         self.pulse_max_pulse_s = None
+        self.last_pulse_ended_at = None
+        self.last_pulse_duration_s = None
+        self.last_pulse_end_rh_pct = None
+        self.last_event = None
+
+        if restored_state:
+            self._restore_from_state(restored_state, now=now)
+
         self.relay.set_state(1, driver=driver)
         self.status = {
             "enabled": self.config.enabled,
-            "mode": "initialized_off",
+            "mode": "initialized_off" if self.phase == "idle" else f"restored_{self.phase}",
             "phase": self.phase,
             "relay_name": self.relay.name,
             "relay_state": self.relay.state,
+            "pulse_count_in_window": self.pulse_count_in_window,
+            "last_pulse_ended_at": self.last_pulse_ended_at.isoformat() if self.last_pulse_ended_at else None,
         }
 
     def update(
@@ -949,6 +1013,37 @@ class HumidityControlRuntime:
             return
 
         if rh_pct < trigger_below_rh_pct:
+            startup_elapsed_s = max(0.0, (now - (self.startup_at or now)).total_seconds())
+            if startup_elapsed_s < self.config.startup_grace_period_s:
+                self._set_status(
+                    mode="startup_grace_period",
+                    now=now,
+                    rh_pct=rh_pct,
+                    schedule_info=schedule_info,
+                    target_rh_pct=target_rh_pct,
+                    trigger_below_rh_pct=trigger_below_rh_pct,
+                    startup_elapsed_s=startup_elapsed_s,
+                    startup_grace_period_s=self.config.startup_grace_period_s,
+                    grace_remaining_s=self.config.startup_grace_period_s - startup_elapsed_s,
+                )
+                return
+
+            if self.last_pulse_ended_at is not None:
+                off_elapsed_s = max(0.0, (now - self.last_pulse_ended_at).total_seconds())
+                if off_elapsed_s < self.config.min_off_s:
+                    self._set_status(
+                        mode="min_off_wait",
+                        now=now,
+                        rh_pct=rh_pct,
+                        schedule_info=schedule_info,
+                        target_rh_pct=target_rh_pct,
+                        trigger_below_rh_pct=trigger_below_rh_pct,
+                        off_elapsed_s=off_elapsed_s,
+                        min_off_s=self.config.min_off_s,
+                        min_off_remaining_s=self.config.min_off_s - off_elapsed_s,
+                    )
+                    return
+
             self._start_pulse(
                 driver=driver,
                 now=now,
@@ -1600,12 +1695,23 @@ class ControlManager:
     pwm_outputs: list[PWMRuntime] = field(default_factory=list)
     humidity_controls: list[HumidityControlRuntime] = field(default_factory=list)
 
+    def export_state(self) -> dict[str, Any]:
+        """Export serializable control state for persistence."""
+
+        return {
+            "humidity_controls": {
+                hc.name: hc.export_state()
+                for hc in self.humidity_controls
+            }
+        }
+
     def initialize(
         self,
         driver: LabjackDriver,
         *,
         now: Optional[dt.datetime] = None,
         startup_pwm_ramp: bool = True,
+        restored_state: Optional[dict[str, Any]] = None,
     ) -> None:
         """Initialize controls into a safe hardware state.
 
@@ -1625,8 +1731,13 @@ class ControlManager:
 
         # Initialize controller state after the relay safety pass so any
         # controlled relay, including the mister, begins off.
+        hc_states = (restored_state or {}).get("humidity_controls", {})
         for humidity_control in self.humidity_controls:
-            humidity_control.initialize(driver, now=now)
+            humidity_control.initialize(
+                driver,
+                now=now,
+                restored_state=hc_states.get(humidity_control.name),
+            )
 
         # Scheduled LED/PWM outputs normally begin off and glide into the
         # schedule target. Config reloads can opt out so changing a setting does
@@ -1761,12 +1872,42 @@ class SystemRuntime:
     controls: ControlManager
     log_writer: LogWriter
     scheduler: Scheduler
+    state_path: Optional[Path] = None
 
     def connect(self) -> "SystemRuntime":
         """Open the hardware driver connection and return ``self``."""
 
         self.driver.connect()
         return self
+
+    def load_state(self) -> Optional[dict[str, Any]]:
+        """Load persisted runtime state if it exists and is not corrupt."""
+
+        if not self.state_path or not self.state_path.exists():
+            return None
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def save_state(self) -> None:
+        """Persist runtime control state atomically to disk."""
+
+        if not self.state_path:
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            state = {
+                "saved_at": dt.datetime.now().astimezone().isoformat(),
+                **self.controls.export_state(),
+            }
+            tmp_path = self.state_path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+            tmp_path.replace(self.state_path)
+        except Exception:
+            pass
 
     def initialize(
         self,
@@ -1776,15 +1917,17 @@ class SystemRuntime:
     ) -> "SystemRuntime":
         """Initialize controls and sampling schedule after connecting."""
 
+        restored_state = self.load_state()
         self.controls.initialize(
             self.driver,
             now=now,
             startup_pwm_ramp=startup_pwm_ramp,
+            restored_state=restored_state,
         )
         self.scheduler.reset()
         return self
 
-    def collect_record(self) -> LogRecord:
+    def collect_record(self, *, now: Optional[dt.datetime] = None) -> LogRecord:
         """Collect one complete log record without writing it to disk.
 
         Sensor and control errors are captured inside the returned record so a
@@ -1793,7 +1936,7 @@ class SystemRuntime:
 
         errors: list[str] = []
         sensor_readings: list[SensorReading] = []
-        now = dt.datetime.now().astimezone()
+        now = now or dt.datetime.now().astimezone()
 
         try:
             self.controls.update_schedules(self.driver, now=now)
@@ -1810,7 +1953,7 @@ class SystemRuntime:
             self.controls.update_humidity_controls(
                 self.driver,
                 sensor_readings,
-                now=dt.datetime.now().astimezone(),
+                now=now,
             )
         except Exception as exc:
             errors.append(f"humidity_controls: {type(exc).__name__}: {exc}")
@@ -1822,7 +1965,7 @@ class SystemRuntime:
         )
 
         return LogRecord(
-            timestamp=dt.datetime.now().astimezone(),
+            timestamp=now,
             device=device,
             sensors=sensor_readings,
             controls=self.controls.snapshots(),
@@ -1834,14 +1977,20 @@ class SystemRuntime:
 
         return self.log_writer.write(record)
 
-    def run_once(self, *, write: bool = True) -> tuple[LogRecord, Optional[Path]]:
+    def run_once(
+        self,
+        *,
+        write: bool = True,
+        now: Optional[dt.datetime] = None,
+    ) -> tuple[LogRecord, Optional[Path]]:
         """Collect one sample, optionally write it, and advance the scheduler."""
 
-        record = self.collect_record()
+        record = self.collect_record(now=now)
 
         path = None
         if write:
             path = self.write_record(record)
+            self.save_state()
 
         self.scheduler.mark_sample_complete()
 
@@ -1920,6 +2069,8 @@ def build_runtime(
             )
         )
 
+    state_path = config.state_path or (config.log_dir / ".runtime_state.json")
+
     return SystemRuntime(
         config=config,
         driver=driver,
@@ -1931,4 +2082,5 @@ def build_runtime(
         ),
         log_writer=LogWriter(log_dir=config.log_dir),
         scheduler=Scheduler(sample_interval_s=config.sample_interval_s),
+        state_path=state_path,
     )

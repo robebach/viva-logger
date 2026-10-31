@@ -1,0 +1,23 @@
+[Unit]
+Description=Viva Logger - Penelope Vivarium Controller
+After=network.target time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/DEV/viva-logger
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/.local/bin/poetry run python -m examples.penelope_full --config VIV-CONFIG/penelope.json
+
+# Restart policy: automatically recover if the script ever crashes or exits
+Restart=always
+RestartSec=10s
+
+# Hardware safety
+TimeoutStopSec=15s
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
