@@ -218,8 +218,9 @@ poetry run pytest
 
 ## 🗺️ Roadmap & Future Architecture
 
+- [x] **Dual-Sensor Vertical Gradient Monitoring**: Top canopy RH (`top-rh`) vs. bottom substrate RH (`low-rh`) telemetry deployed to monitor the vivarium microclimate gradient.
+- [ ] **Nocturnal Activity & Movement Tracking Camera**: Integrate an infrared (NoIR) camera module with computer vision motion tracking / timelapse capture to monitor Penelope's nocturnal activity, tracking her movements when she emerges from her dark upper shelf / vertical PVC sleeping hide and descends to the lower vivarium at night.
 - [ ] **Hardware-Agnostic Driver Abstraction Layer (HAL)**: While **LabJack** remains the gold standard for laboratory instrumentation and noise-free ADC measurements, decouple driver bindings to support alternate backends (e.g., native Raspberry Pi GPIO, ESP32 microcontrollers via I2C/UART, Home Assistant / MQTT bridge). *(Low priority — LabJack reliability is unmatched).*
-- [ ] **Dual-Sensor Vertical Gradient Control**: Map top canopy RH vs. bottom substrate RH to monitor the vivarium microclimate gradient.
 - [ ] **Ultra-Quiet Circulation Fan Module**: PWM-controlled low-speed brushless fan to gently circulate air and balance the vertical gradient, mimicking natural forest breezes.
 - [ ] **Physical Stepper Dimmer Driver**: Trinamic TMC2208/TMC2209 StealthChop integration to execute the physical 0–180° fixture rotation dead silently.
 - [ ] **Habitat Weather Mode**: Optional synchronization with live weather radar/satellite precipitation feeds for real-time rain and light dynamics.
