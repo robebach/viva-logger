@@ -6,6 +6,7 @@ VIV-LOGS/*
 **/VIV-LOGS/*
 *.state.json
 .runtime_state.json
+*.local.md
 .DS_Store
 */.DS_Store
 
