@@ -21,6 +21,17 @@
         "rx_len": 4,
         "speed": 65536
       }
+    },
+    {
+      "sensor_type": "t9602",
+      "name": "low-rh",
+      "i2c": {
+        "sda_dio": 10,
+        "scl_dio": 11,
+        "address": 40,
+        "rx_len": 4,
+        "speed": 65536
+      }
     }
   ],
   "relays": [
