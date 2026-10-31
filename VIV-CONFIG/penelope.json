@@ -13,7 +13,7 @@
     },
     {
       "sensor_type": "t9602",
-      "name": "temp-rh",
+      "name": "low-rh",
       "i2c": {
         "sda_dio": 8,
         "scl_dio": 9,
@@ -24,7 +24,7 @@
     },
     {
       "sensor_type": "t9602",
-      "name": "low-rh",
+      "name": "top-rh",
       "i2c": {
         "sda_dio": 10,
         "scl_dio": 11,
@@ -70,7 +70,7 @@
   "humidity_controls": [
     {
       "name": "penelope-mister",
-      "rh_sensor": "temp-rh",
+      "rh_sensor": "top-rh",
       "relay": "misting-pump-eio4",
       "enabled": true,
       "schedules": [

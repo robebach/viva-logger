@@ -65,10 +65,10 @@ Originally engineered for **Penelope**, a crested gecko (*Correlophus ciliatus*)
 │                           LabJack T4 DAQ                               │
 │                                                                        │
 │   DIO6  ───> 0-10V Dimmer Module (PWM @ 1000 Hz)                       │
-│   DIO8  ───> T9602 Canopy SDA (3.3V I2C, 0x28)                         │
-│   DIO9  ───> T9602 Canopy SCL (3.3V I2C)                               │
-│   DIO10 ───> Secondary Floor SDA (Planned Gradient Sensor)             │
-│   DIO11 ───> Secondary Floor SCL                                       │
+│   DIO8  ───> T9602 Lower/Floor SDA (3.3V I2C, 0x28)                    │
+│   DIO9  ───> T9602 Lower/Floor SCL (3.3V I2C)                          │
+│   DIO10 ───> T9602 Top/Canopy SDA (3.3V I2C, 0x28)                     │
+│   DIO11 ───> T9602 Top/Canopy SCL (3.3V I2C)                           │
 │   DIO12 ───> Active-Low Relay ───> MistKing High-Pressure Pump         │
 └────────────────────────────────────────────────────────────────────────┘
 ```

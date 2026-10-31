@@ -165,6 +165,12 @@ def default_numeric_selection(columns: list[str]) -> list[str]:
     """Choose useful default numeric series for the trends tab."""
 
     priority = (
+        "sensor:top-rh:rh_pct",
+        "sensor:top-rh:temp_f",
+        "sensor:low-rh:rh_pct",
+        "sensor:low-rh:temp_f",
+        "sensor:top-rh:vpd_kpa",
+        "sensor:low-rh:vpd_kpa",
         "sensor:temp-rh:rh_pct",
         "sensor:temp-rh:temp_f",
         "sensor:temp-rh:vpd_kpa",
@@ -769,13 +775,21 @@ def create_app(
         connected = latest.get("device:connected")
         serial = latest.get("device:serial_number")
 
-        rh = latest_value(frame, ":rh_pct")
-        temp_f = latest_value(
+        top_rh = latest_value(frame, ":rh_pct", preferred_prefix="sensor:top-rh:")
+        top_temp_f = latest_value(frame, ":temp_f", preferred_prefix="sensor:top-rh:")
+        top_vpd = latest_value(frame, ":vpd_kpa", preferred_prefix="sensor:top-rh:")
+
+        low_rh = latest_value(frame, ":rh_pct", preferred_prefix="sensor:low-rh:")
+        low_temp_f = latest_value(frame, ":temp_f", preferred_prefix="sensor:low-rh:")
+        low_vpd = latest_value(frame, ":vpd_kpa", preferred_prefix="sensor:low-rh:")
+
+        rh = top_rh if top_rh is not None else latest_value(frame, ":rh_pct")
+        temp_f = top_temp_f if top_temp_f is not None else latest_value(
             frame,
             ":temp_f",
             preferred_prefix="sensor:temp-rh:",
         )
-        vpd = latest_value(frame, ":vpd_kpa")
+        vpd = top_vpd if top_vpd is not None else latest_value(frame, ":vpd_kpa")
         led = latest_value(frame, ":output_duty_cycle")
         target = latest_value(
             frame,
@@ -843,46 +857,63 @@ def create_app(
                 f"pulse {format_number(max_pulse, 0)}s"
             )
 
+        metric_cards_list = [
+            metric_card(
+                "Last sample",
+                timestamp.strftime("%H:%M:%S"),
+                timestamp.strftime("%Y-%m-%d %Z"),
+            ),
+            metric_card(
+                "Device",
+                "connected" if connected else "offline",
+                f"serial {serial}" if serial else None,
+            ),
+        ]
+
+        if top_rh is not None and low_rh is not None:
+            metric_cards_list.extend([
+                metric_card("Canopy RH", f"{format_number(top_rh)}%", "top-rh"),
+                metric_card("Canopy Temp", f"{format_number(top_temp_f)} F", "top-rh"),
+                metric_card("Floor RH", f"{format_number(low_rh)}%", "low-rh"),
+                metric_card("Floor Temp", f"{format_number(low_temp_f)} F", "low-rh"),
+                metric_card("Canopy VPD", f"{format_number(top_vpd, 2)} kPa", "top-rh"),
+            ])
+        else:
+            metric_cards_list.extend([
+                metric_card("RH", f"{format_number(rh)}%", "humidity"),
+                metric_card("Air temp", f"{format_number(temp_f)} F", "temperature"),
+                metric_card("VPD", f"{format_number(vpd, 2)} kPa", "vpd"),
+            ])
+
+        metric_cards_list.extend([
+            metric_card("LED", format_number(led, 2), "output duty"),
+            metric_card(
+                "Mister",
+                mister_mode,
+                (
+                    f"phase {mister_phase}, relay {relay}, "
+                    f"alarms {format_number(alarm_count, 0)}"
+                ),
+            ),
+            metric_card(
+                "Logged target",
+                f"{format_number(target)}%",
+                target_detail,
+            ),
+            metric_card(
+                "Errors",
+                errors_count,
+                "clear" if errors_count == 0 else "check record",
+            ),
+        ])
+
         cards = html.Div(
             style={
                 "display": "grid",
                 "gridTemplateColumns": "repeat(auto-fit, minmax(180px, 1fr))",
                 "gap": "12px",
             },
-            children=[
-                metric_card(
-                    "Last sample",
-                    timestamp.strftime("%H:%M:%S"),
-                    timestamp.strftime("%Y-%m-%d %Z"),
-                ),
-                metric_card(
-                    "Device",
-                    "connected" if connected else "offline",
-                    f"serial {serial}" if serial else None,
-                ),
-                metric_card("RH", f"{format_number(rh)}%", "temp-rh"),
-                metric_card("Air temp", f"{format_number(temp_f)} F", "temp-rh"),
-                metric_card("VPD", f"{format_number(vpd, 2)} kPa", "temp-rh"),
-                metric_card("LED", format_number(led, 2), "output duty"),
-                metric_card(
-                    "Mister",
-                    mister_mode,
-                    (
-                        f"phase {mister_phase}, relay {relay}, "
-                        f"alarms {format_number(alarm_count, 0)}"
-                    ),
-                ),
-                metric_card(
-                    "Logged target",
-                    f"{format_number(target)}%",
-                    target_detail,
-                ),
-                metric_card(
-                    "Errors",
-                    errors_count,
-                    "clear" if errors_count == 0 else "check record",
-                ),
-            ],
+            children=metric_cards_list,
         )
 
         latest_record = records[-1]
