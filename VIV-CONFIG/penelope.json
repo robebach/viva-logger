@@ -48,17 +48,17 @@
       "name": "led-0-10v",
       "dio": 6,
       "frequency_hz": 1000.0,
-      "duty_cycle": 0.04,
+      "duty_cycle": 0.15,
       "enabled": true,
       "schedules": [
         {
           "name": "daylight-ramp",
           "start_time": "06:00:00",
           "end_time": "20:00:00",
-          "min_duty_cycle": 0.00,
+          "min_duty_cycle": 0.15,
           "max_duty_cycle": 1.0,
-          "ramp_duration_s": 60.0,
-          "outside_duty_cycle": 0.00,
+          "ramp_duration_s": 2700.0,
+          "outside_duty_cycle": 0.15,
           "weather_modulation": true,
           "weather_min_peak": 0.80,
           "weather_max_peak": 1.00
