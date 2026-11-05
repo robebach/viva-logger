@@ -55,7 +55,7 @@
           "name": "daylight-ramp",
           "start_time": "06:00:00",
           "end_time": "20:00:00",
-          "min_duty_cycle": 0.0,
+          "min_duty_cycle": 0.20,
           "max_duty_cycle": 1.0,
           "ramp_duration_s": 2700.0,
           "outside_duty_cycle": 0.0,

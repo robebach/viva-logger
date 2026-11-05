@@ -52,6 +52,8 @@ class LabjackDriver:
 
         self._ljm = None
         self._pwm_roll_values: dict[int, int] = {}
+        self._pwm_applied_duty: dict[int, float] = {}
+        self._pwm_ef_enabled: dict[int, bool] = {}
 
     def connect(self) -> "LabjackDriver":
         """
@@ -88,6 +90,8 @@ class LabjackDriver:
 
         self.connected = False
         self.handle = None
+        self._pwm_applied_duty.clear()
+        self._pwm_ef_enabled.clear()
 
     def _require_connection(self) -> None:
         """Raise if an operation needs an open LabJack connection."""
@@ -173,13 +177,22 @@ class LabjackDriver:
 
         self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_INDEX", 0)
         self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_OPTIONS", 0)
-        self._ljm.eWriteName(
-            self.handle,
-            f"DIO{dio}_EF_CONFIG_A",
-            int(duty_cycle * roll),
-        )
 
-        self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_ENABLE", 1)
+        if duty_cycle <= 0.0:
+            # Clamped off: disable PWM extended feature and drive digital LOW (0.0V)
+            self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_ENABLE", 0)
+            self._ljm.eWriteName(self.handle, f"DIO{dio}", 0)
+            self._pwm_ef_enabled[dio] = False
+        else:
+            self._ljm.eWriteName(
+                self.handle,
+                f"DIO{dio}_EF_CONFIG_A",
+                int(duty_cycle * roll),
+            )
+            self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_ENABLE", 1)
+            self._pwm_ef_enabled[dio] = True
+
+        self._pwm_applied_duty[dio] = duty_cycle
 
     def set_pwm(
         self,
@@ -188,8 +201,14 @@ class LabjackDriver:
         duty_cycle: float,
         frequency_hz: float = 1000.0,
         roll_value: Optional[int] = None,
+        force: bool = False,
     ) -> None:
-        """Update the duty cycle for a previously configured PWM output."""
+        """Update the duty cycle for a previously configured PWM output.
+
+        When ``duty_cycle`` is <= 0.0, the PWM extended feature is disabled and
+        the digital output is clamped hard to 0 (GND) to prevent timer rollover
+        glitches or analog threshold floating.
+        """
 
         self._require_connection()
 
@@ -202,11 +221,34 @@ class LabjackDriver:
             )
             self._pwm_roll_values[dio] = roll
 
-        self._ljm.eWriteName(
-            self.handle,
-            f"DIO{dio}_EF_CONFIG_A",
-            int(duty_cycle * roll),
-        )
+        last_duty = self._pwm_applied_duty.get(dio)
+        if not force and last_duty is not None and abs(last_duty - duty_cycle) < 1e-6:
+            return
+
+        if duty_cycle <= 0.0:
+            # Hard clamp: disable PWM timer on this DIO and pull hard to ground (0V)
+            self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_ENABLE", 0)
+            self._ljm.eWriteName(self.handle, f"DIO{dio}", 0)
+            self._pwm_ef_enabled[dio] = False
+        else:
+            if not self._pwm_ef_enabled.get(dio, False):
+                self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_INDEX", 0)
+                self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_OPTIONS", 0)
+                self._ljm.eWriteName(
+                    self.handle,
+                    f"DIO{dio}_EF_CONFIG_A",
+                    int(duty_cycle * roll),
+                )
+                self._ljm.eWriteName(self.handle, f"DIO{dio}_EF_ENABLE", 1)
+                self._pwm_ef_enabled[dio] = True
+            else:
+                self._ljm.eWriteName(
+                    self.handle,
+                    f"DIO{dio}_EF_CONFIG_A",
+                    int(duty_cycle * roll),
+                )
+
+        self._pwm_applied_duty[dio] = duty_cycle
 
     def read_pwm_duty_cycle(
         self,
@@ -218,7 +260,8 @@ class LabjackDriver:
         """Return current PWM duty when DIO_EF PWM is already enabled.
 
         ``None`` means the pin does not appear to be running PWM or the current
-        configuration could not be read safely.
+        configuration could not be read safely. Returns ``0.0`` if the pin is
+        safely clamped off.
         """
 
         self._require_connection()
@@ -229,7 +272,17 @@ class LabjackDriver:
         except Exception:
             return None
 
-        if not enabled or index != 0:
+        if not enabled:
+            # If DIO_EF is disabled, check if digital pin is driven LOW (0.0V clamp)
+            try:
+                state = int(self._ljm.eReadName(self.handle, f"DIO{dio}"))
+                if state == 0:
+                    return 0.0
+            except Exception:
+                pass
+            return 0.0
+
+        if index != 0:
             return None
 
         try:
@@ -370,6 +423,7 @@ class MockLabjackDriver(LabjackDriver):
         duty_cycle: float,
         frequency_hz: float = 1000.0,
         roll_value: Optional[int] = None,
+        force: bool = False,
     ) -> None:
         """Record a PWM duty-cycle update in memory."""
 

@@ -96,3 +96,77 @@ def test_pwm_weather_schedule():
     assert 0.80 <= duty <= 1.00
     assert status["mode"] == "max"
     assert "cloud_cover_forecast_pct" in status or "weather_modulated_peak_duty" in status
+
+
+def test_pwm_ramp_down_to_min_duty():
+    from logger.models import PWMConfig, PWMScheduleConfig
+    from logger.runtime import PWMRuntime
+
+    schedule = PWMScheduleConfig(
+        name="test-ramp",
+        start_time=dt.time(6, 0),
+        end_time=dt.time(20, 0),
+        min_duty_cycle=0.20,
+        max_duty_cycle=1.00,
+        ramp_duration_s=3600.0,
+        outside_duty_cycle=0.0,
+    )
+    config = PWMConfig(name="test-led", dio=6, schedules=[schedule])
+    pwm = PWMRuntime(config=config)
+
+    # 1. 06:00:00 (start of dawn ramp): should start at min_duty (0.20)
+    now_dawn = dt.datetime(2026, 11, 4, 6, 0, 0)
+    duty, status = pwm.scheduled_duty_cycle(now=now_dawn)
+    assert duty == 0.20
+    assert status["mode"] == "ramping_up"
+
+    # 2. 19:30:00 (halfway through sunset ramp 19:00 - 20:00): should ramp halfway between 1.0 and 0.20 -> 0.60
+    now_sunset = dt.datetime(2026, 11, 4, 19, 30, 0)
+    duty, status = pwm.scheduled_duty_cycle(now=now_sunset)
+    assert abs(duty - 0.60) < 0.01
+    assert status["mode"] == "ramping_down"
+
+    # 3. 19:59:59 (end of sunset ramp): should approach min_duty (0.20)
+    now_dusk = dt.datetime(2026, 11, 4, 19, 59, 59)
+    duty, status = pwm.scheduled_duty_cycle(now=now_dusk)
+    assert abs(duty - 0.20) < 0.01
+    assert status["mode"] == "ramping_down"
+
+    # 4. 20:00:01 (outside active window): should be outside_duty (0.0)
+    now_night = dt.datetime(2026, 11, 4, 20, 0, 1)
+    duty, status = pwm.scheduled_duty_cycle(now=now_night)
+    assert duty == 0.0
+    assert status["mode"] == "outside_schedule"
+
+
+def test_labjack_driver_pwm_zero_clamp():
+    from unittest.mock import MagicMock
+    from logger.hardware import LabjackDriver
+    from logger.models import LabjackConfig
+
+    driver = LabjackDriver(LabjackConfig(device_type="T4"))
+    mock_ljm = MagicMock()
+    driver._ljm = mock_ljm
+    driver.handle = 1
+    driver.connected = True
+
+    # Initial configure with duty 0.0: should disable EF and write DIO6 = 0
+    driver.configure_pwm(dio=6, duty_cycle=0.0)
+    mock_ljm.eWriteName.assert_any_call(1, "DIO6_EF_ENABLE", 0)
+    mock_ljm.eWriteName.assert_any_call(1, "DIO6", 0)
+
+    # Calling set_pwm with 0.0 again: should be deduplicated (no redundant writes)
+    mock_ljm.eWriteName.reset_mock()
+    driver.set_pwm(dio=6, duty_cycle=0.0)
+    assert mock_ljm.eWriteName.call_count == 0
+
+    # Calling set_pwm with > 0.0: should enable EF and write CONFIG_A
+    driver.set_pwm(dio=6, duty_cycle=0.5)
+    mock_ljm.eWriteName.assert_any_call(1, "DIO6_EF_ENABLE", 1)
+    mock_ljm.eWriteName.assert_any_call(1, "DIO6_EF_CONFIG_A", 40000)
+
+    # Calling set_pwm with 0.0: should clamp off (EF_ENABLE = 0 and DIO6 = 0)
+    mock_ljm.eWriteName.reset_mock()
+    driver.set_pwm(dio=6, duty_cycle=0.0)
+    mock_ljm.eWriteName.assert_any_call(1, "DIO6_EF_ENABLE", 0)
+    mock_ljm.eWriteName.assert_any_call(1, "DIO6", 0)

@@ -219,6 +219,8 @@ poetry run pytest
 ## 🗺️ Roadmap & Future Architecture
 
 - [x] **Dual-Sensor Vertical Gradient Monitoring**: Top canopy RH (`top-rh`) vs. bottom substrate RH (`low-rh`) telemetry deployed to monitor the vivarium microclimate gradient.
+- [ ] **Gravity-Fed Plant Wall Micro-Irrigation System**: Overhead gravity reservoir with a multi-port manifold and direct-acting zero-differential valves (or motorized micro-valves) to deliver targeted pulse irrigation to wall-mounted epiphytes and moss pockets based on schedule or individual pocket moisture sensors, with anti-siphon vacuum break.
+- [ ] **Predictive Substrate Hydration Trigger**: Algorithmic substrate moisture estimator using cumulative psychrometric deficit (integrated VPD $\int \text{VPD} \cdot dt$) and floor RH decay curves, or direct analog capacitive moisture sensing via LabJack AIN0–AIN3.
 - [ ] **Nocturnal Activity & Movement Tracking Camera**: Integrate an infrared (NoIR) camera module with computer vision motion tracking / timelapse capture to monitor Penelope's nocturnal activity, tracking her movements when she emerges from her dark upper shelf / vertical PVC sleeping hide and descends to the lower vivarium at night.
 - [ ] **Hardware-Agnostic Driver Abstraction Layer (HAL)**: While **LabJack** remains the gold standard for laboratory instrumentation and noise-free ADC measurements, decouple driver bindings to support alternate backends (e.g., native Raspberry Pi GPIO, ESP32 microcontrollers via I2C/UART, Home Assistant / MQTT bridge). *(Low priority — LabJack reliability is unmatched).*
 - [ ] **Ultra-Quiet Circulation Fan Module**: PWM-controlled low-speed brushless fan to gently circulate air and balance the vertical gradient, mimicking natural forest breezes.

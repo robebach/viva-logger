@@ -623,8 +623,8 @@ class PWMRuntime:
                 and remaining_s < effective_ramp_duration_s
             ):
                 ramp_fraction = remaining_s / effective_ramp_duration_s
-                duty_cycle = outside_duty + (
-                    (max_duty - outside_duty) * ramp_fraction
+                duty_cycle = min_duty + (
+                    (max_duty - min_duty) * ramp_fraction
                 )
                 mode = "ramping_down"
             else:
